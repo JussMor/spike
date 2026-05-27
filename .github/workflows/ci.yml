@@ -30,10 +30,14 @@ jobs:
           node-version: '22'
       - name: Install webwright-demo deps
         run: cd examples/webwright-demo && npm install
-      - name: Run orchestrator (exits non-zero on unresolved conflicts)
+      - name: Single-project conflict gate (webwright demo)
         run: |
           cd examples/webwright-demo
           VCS_BIN=../../target/release/vcs node src/orchestrator.js
+      - name: Multi-project conflict gate (frontend + backend hub)
+        run: |
+          cd examples/multi-project-demo
+          VCS_BIN=../../target/release/vcs node orchestrator.js
 
   build:
     name: Vite build + tsc

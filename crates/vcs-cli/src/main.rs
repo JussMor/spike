@@ -3,6 +3,8 @@
 //! All commands accept --json for machine-readable output.
 //! Human output is plain text; JSON output is newline-terminated JSON.
 
+mod serve;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
@@ -156,6 +158,19 @@ enum Cmd {
     Diff {
         from: String,
         to: String,
+    },
+
+    /// Start an HTTP hub server (enables multi-project communication)
+    ///
+    /// Agents in other projects push their stacks to this hub via:
+    ///   POST http://host:<port>/api/vcs/push
+    ///
+    /// The hub builds a cross-project view and surfaces conflicts before
+    /// anything is written to disk in any project.
+    Serve {
+        /// Port to listen on (default: 7474)
+        #[arg(long, short, default_value = "7474")]
+        port: u16,
     },
 }
 
@@ -404,6 +419,15 @@ fn main() -> Result<()> {
                     println!("{} {}", marker, e.path);
                 }
             }
+        }
+
+        Cmd::Serve { port } => {
+            // Ensure the hub store exists
+            let store = Store::open_or_init(&sp).context("opening hub store")?;
+            println!("vcs hub store: {}", sp.display());
+            // Spin up a tokio runtime only for serve (keeps other commands synchronous)
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(serve::run(store, port))?;
         }
     }
 

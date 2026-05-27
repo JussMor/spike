@@ -24,6 +24,7 @@
 pub mod blob;
 pub mod change;
 pub mod error;
+pub mod hub;
 pub mod intent;
 pub mod stack;
 pub mod store;
@@ -33,6 +34,7 @@ pub mod view;
 pub use blob::BlobStore;
 pub use change::{Change, ChangeId, ConflictId, Op, StackId, ViewId};
 pub use error::{Result, VcsError};
+pub use hub::{HubBundle, HubChange, HubStack};
 pub use intent::Intent;
 pub use stack::{Stack, StackStatus};
 pub use store::{DiffEntry, Store};

@@ -16,3 +16,7 @@ serde_json = { workspace = true }
 clap       = { workspace = true }
 tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
+axum          = { version = "0.7", features = ["json"] }
+tower-http    = { version = "0.5", features = ["cors"] }
+tokio         = { version = "1",   features = ["rt-multi-thread", "net", "macros"] }
+base64        = "0.22"

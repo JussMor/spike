@@ -1,0 +1,11 @@
+{
+  "name": "multi-project-demo",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Demonstrates vcs-spike connecting a frontend and backend project via a hub server",
+  "scripts": {
+    "demo":       "node orchestrator.js",
+    "demo:clean": "rm -rf .vcs-hub .vcs-frontend .vcs-backend"
+  }
+}

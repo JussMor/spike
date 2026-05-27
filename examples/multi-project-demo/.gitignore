@@ -1,0 +1,5 @@
+.vcs-hub/
+.vcs-frontend/
+.vcs-backend/
+.tmp-*
+node_modules/

@@ -1,0 +1,28 @@
+{
+  "name": "vcs-spike",
+  "version": "0.1.0",
+  "description": "Agent-native VCS — track parallel agent changes, surface conflicts before they hit disk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JussMor/spike"
+  },
+  "keywords": ["vcs", "agents", "ai", "conflict", "multi-agent"],
+  "type": "module",
+  "bin": {
+    "vcs": "bin/vcs.js"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".":          "./lib/index.js",
+    "./client":   "./lib/client.js",
+    "./remote":   "./lib/remote-client.js",
+    "./hub":      "./lib/hub-client.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
