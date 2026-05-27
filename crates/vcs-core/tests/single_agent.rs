@@ -21,10 +21,20 @@ fn edit_and_read_through_view() {
 
     // Edit three files
     store
-        .edit(&stack, "src/main.rs", b"fn main() {}", Intent::new("initial main"))
+        .edit(
+            &stack,
+            "src/main.rs",
+            b"fn main() {}",
+            Intent::new("initial main"),
+        )
         .unwrap();
     store
-        .edit(&stack, "src/lib.rs", b"pub fn hello() {}", Intent::new("add lib"))
+        .edit(
+            &stack,
+            "src/lib.rs",
+            b"pub fn hello() {}",
+            Intent::new("add lib"),
+        )
         .unwrap();
     let tip = store
         .edit(&stack, "README.md", b"# project", Intent::new("add readme"))
@@ -56,9 +66,15 @@ fn log_returns_changes_oldest_first() {
     let (store, _dir) = store();
     let stack = store.open_stack("agent-log", None).unwrap();
 
-    store.edit(&stack, "a.txt", b"aaa", Intent::new("first")).unwrap();
-    store.edit(&stack, "b.txt", b"bbb", Intent::new("second")).unwrap();
-    store.edit(&stack, "c.txt", b"ccc", Intent::new("third")).unwrap();
+    store
+        .edit(&stack, "a.txt", b"aaa", Intent::new("first"))
+        .unwrap();
+    store
+        .edit(&stack, "b.txt", b"bbb", Intent::new("second"))
+        .unwrap();
+    store
+        .edit(&stack, "c.txt", b"ccc", Intent::new("third"))
+        .unwrap();
 
     let log = store.log(&stack).unwrap();
     assert_eq!(log.len(), 3);
@@ -71,8 +87,12 @@ fn delete_removes_file_from_view() {
     let (store, _dir) = store();
     let stack = store.open_stack("agent-del", None).unwrap();
 
-    store.edit(&stack, "file.txt", b"hello", Intent::new("create")).unwrap();
-    let tip = store.delete(&stack, "file.txt", Intent::new("remove it")).unwrap();
+    store
+        .edit(&stack, "file.txt", b"hello", Intent::new("create"))
+        .unwrap();
+    let tip = store
+        .delete(&stack, "file.txt", Intent::new("remove it"))
+        .unwrap();
 
     let view = store.open_view(tip.clone(), &[stack.clone()]).unwrap();
     let files = store.list_files(&view).unwrap();
@@ -84,15 +104,29 @@ fn rename_old_gone_new_present() {
     let (store, _dir) = store();
     let stack = store.open_stack("agent-rename", None).unwrap();
 
-    store.edit(&stack, "old.txt", b"content", Intent::new("create")).unwrap();
+    store
+        .edit(&stack, "old.txt", b"content", Intent::new("create"))
+        .unwrap();
     let tip = store
-        .rename(&stack, "old.txt", "new.txt", b"content", Intent::new("rename"))
+        .rename(
+            &stack,
+            "old.txt",
+            "new.txt",
+            b"content",
+            Intent::new("rename"),
+        )
         .unwrap();
 
     let view = store.open_view(tip.clone(), &[stack.clone()]).unwrap();
     let files = store.list_files(&view).unwrap();
-    assert!(!files.contains(&"old.txt".to_string()), "old path should be gone");
-    assert!(files.contains(&"new.txt".to_string()), "new path should exist");
+    assert!(
+        !files.contains(&"old.txt".to_string()),
+        "old path should be gone"
+    );
+    assert!(
+        files.contains(&"new.txt".to_string()),
+        "new path should exist"
+    );
 
     let content = store.read_file(&view, "new.txt").unwrap();
     assert_eq!(content, b"content");
@@ -108,11 +142,59 @@ fn intent_survives_round_trip() {
         .with_tool_call(json!({"name": "edit_file", "args": {"path": "src/main.rs"}}))
         .with_task_ref("task-42");
 
-    store.edit(&stack, "src/main.rs", b"fn main() {}", intent).unwrap();
+    store
+        .edit(&stack, "src/main.rs", b"fn main() {}", intent)
+        .unwrap();
 
     let log = store.log(&stack).unwrap();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].intent.reason, "refactor main loop");
     assert!(log[0].intent.tool_call.is_some());
     assert_eq!(log[0].intent.task_ref.as_deref(), Some("task-42"));
+}
+
+#[test]
+fn snapshot_at_composes_parent_chain() {
+    let (store, _dir) = store();
+    let stack = store.open_stack("agent-snapshot", None).unwrap();
+
+    store
+        .edit(&stack, "a.txt", b"one", Intent::new("create a"))
+        .unwrap();
+    let second = store
+        .edit(&stack, "b.txt", b"two", Intent::new("create b"))
+        .unwrap();
+    let third = store
+        .edit(&stack, "a.txt", b"three", Intent::new("edit a"))
+        .unwrap();
+
+    let second_snapshot = store.snapshot_at(&second).unwrap();
+    assert_eq!(store.get_blob(&second_snapshot["a.txt"]).unwrap(), b"one");
+    assert_eq!(store.get_blob(&second_snapshot["b.txt"]).unwrap(), b"two");
+
+    let third_snapshot = store.snapshot_at(&third).unwrap();
+    assert_eq!(store.get_blob(&third_snapshot["a.txt"]).unwrap(), b"three");
+    assert_eq!(store.get_blob(&third_snapshot["b.txt"]).unwrap(), b"two");
+}
+
+#[test]
+fn export_import_preserves_snapshots() {
+    let (source, _source_dir) = store();
+    let stack = source.open_stack("agent-export", None).unwrap();
+    source
+        .edit(&stack, "a.txt", b"one", Intent::new("create a"))
+        .unwrap();
+    let tip = source
+        .edit(&stack, "b.txt", b"two", Intent::new("create b"))
+        .unwrap();
+    source.close_stack(&stack).unwrap();
+
+    let bundle = source.export_bundle("project-a").unwrap();
+
+    let (dest, _dest_dir) = store();
+    dest.import_bundle(&bundle).unwrap();
+
+    let snapshot = dest.snapshot_at(&tip).unwrap();
+    assert_eq!(dest.get_blob(&snapshot["a.txt"]).unwrap(), b"one");
+    assert_eq!(dest.get_blob(&snapshot["b.txt"]).unwrap(), b"two");
 }

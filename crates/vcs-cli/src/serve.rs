@@ -44,8 +44,8 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -84,41 +84,46 @@ type ApiResult<T> = std::result::Result<Json<T>, ApiError>;
 
 #[derive(Deserialize)]
 struct OpenStackBody {
-    agent_id:       String,
+    agent_id: String,
     base_change_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct IntentBody {
-    reason:   String,
+    reason: String,
     task_ref: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct EditBody {
-    stack_id:    String,
-    path:        String,
+    stack_id: String,
+    path: String,
     content_b64: String,
-    intent:      IntentBody,
+    intent: IntentBody,
 }
 
 #[derive(Deserialize)]
 struct DeleteBody {
     stack_id: String,
-    path:     String,
-    intent:   IntentBody,
+    path: String,
+    intent: IntentBody,
 }
 
 #[derive(Deserialize)]
 struct OpenViewBody {
     base_change_id: String,
-    stack_ids:      Vec<String>,
+    stack_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct ResolveBody {
-    pick:              Option<String>,
+    pick: Option<String>,
     merge_content_b64: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    project_id: Option<String>,
 }
 
 // ── GET handlers ───────────────────────────────────────────────────────────
@@ -152,20 +157,37 @@ async fn get_active_view(State(db): State<Db>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(store.latest_view()?)?))
 }
 
-async fn get_view_files(
-    State(db): State<Db>,
-    Path(view_id): Path<String>,
-) -> ApiResult<Value> {
+async fn get_view_files(State(db): State<Db>, Path(view_id): Path<String>) -> ApiResult<Value> {
     let store = db.lock().unwrap();
     Ok(Json(json!(store.list_files(&view_id)?)))
 }
 
-async fn get_view_conflicts(
-    State(db): State<Db>,
-    Path(view_id): Path<String>,
-) -> ApiResult<Value> {
+async fn get_view_conflicts(State(db): State<Db>, Path(view_id): Path<String>) -> ApiResult<Value> {
     let store = db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.conflicts(&view_id)?)?))
+}
+
+async fn get_export(
+    State(db): State<Db>,
+    Query(query): Query<ExportQuery>,
+) -> ApiResult<HubBundle> {
+    let store = db.lock().unwrap();
+    let project_id = query.project_id.as_deref().unwrap_or("hub");
+    Ok(Json(store.export_bundle(project_id)?))
+}
+
+async fn get_blob(
+    State(db): State<Db>,
+    Path(hash): Path<String>,
+) -> std::result::Result<Response, ApiError> {
+    let store = db.lock().unwrap();
+    let data = store.get_blob(&hash)?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        data,
+    )
+        .into_response())
 }
 
 // ── POST handlers ──────────────────────────────────────────────────────────
@@ -179,10 +201,7 @@ async fn post_stack_open(
     Ok(Json(json!({ "stack_id": stack_id })))
 }
 
-async fn post_stack_close(
-    State(db): State<Db>,
-    Path(stack_id): Path<String>,
-) -> ApiResult<Value> {
+async fn post_stack_close(State(db): State<Db>, Path(stack_id): Path<String>) -> ApiResult<Value> {
     let store = db.lock().unwrap();
     store.close_stack(&stack_id)?;
     Ok(Json(json!({ "ok": true })))
@@ -197,34 +216,30 @@ async fn post_stack_abandon(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn post_edit(
-    State(db): State<Db>,
-    Json(body): Json<EditBody>,
-) -> ApiResult<Value> {
-    let content = B64.decode(&body.content_b64)
+async fn post_edit(State(db): State<Db>, Json(body): Json<EditBody>) -> ApiResult<Value> {
+    let content = B64
+        .decode(&body.content_b64)
         .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))?;
     let mut intent = Intent::new(&body.intent.reason);
-    if let Some(tr) = body.intent.task_ref { intent = intent.with_task_ref(tr); }
+    if let Some(tr) = body.intent.task_ref {
+        intent = intent.with_task_ref(tr);
+    }
     let store = db.lock().unwrap();
     let change_id = store.edit(&body.stack_id, &body.path, &content, intent)?;
     Ok(Json(json!({ "change_id": change_id })))
 }
 
-async fn post_delete(
-    State(db): State<Db>,
-    Json(body): Json<DeleteBody>,
-) -> ApiResult<Value> {
+async fn post_delete(State(db): State<Db>, Json(body): Json<DeleteBody>) -> ApiResult<Value> {
     let mut intent = Intent::new(&body.intent.reason);
-    if let Some(tr) = body.intent.task_ref { intent = intent.with_task_ref(tr); }
+    if let Some(tr) = body.intent.task_ref {
+        intent = intent.with_task_ref(tr);
+    }
     let store = db.lock().unwrap();
     let change_id = store.delete(&body.stack_id, &body.path, intent)?;
     Ok(Json(json!({ "change_id": change_id })))
 }
 
-async fn post_view_open(
-    State(db): State<Db>,
-    Json(body): Json<OpenViewBody>,
-) -> ApiResult<Value> {
+async fn post_view_open(State(db): State<Db>, Json(body): Json<OpenViewBody>) -> ApiResult<Value> {
     let store = db.lock().unwrap();
     let view_id = store.open_view(body.base_change_id, &body.stack_ids)?;
     Ok(Json(json!({ "view_id": view_id })))
@@ -238,14 +253,17 @@ async fn post_resolve(
     let resolution = if let Some(sid) = body.pick {
         Resolution::Pick { stack_id: sid }
     } else if let Some(b64) = body.merge_content_b64 {
-        let data = B64.decode(&b64)
+        let data = B64
+            .decode(&b64)
             .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))?;
         let store = db.lock().unwrap();
         let hash = store.put_blob(&data)?;
         store.resolve(&conflict_id, Resolution::Merge { blob_hash: hash })?;
         return Ok(Json(json!({ "ok": true })));
     } else {
-        return Err(ApiError(anyhow::anyhow!("provide pick or merge_content_b64")));
+        return Err(ApiError(anyhow::anyhow!(
+            "provide pick or merge_content_b64"
+        )));
     };
     let store = db.lock().unwrap();
     store.resolve(&conflict_id, resolution)?;
@@ -256,10 +274,7 @@ async fn post_resolve(
 ///
 /// After all projects have pushed, open a cross-project view via
 /// `POST /api/vcs/views/open` with all the stack IDs from all projects.
-async fn post_push(
-    State(db): State<Db>,
-    Json(bundle): Json<HubBundle>,
-) -> ApiResult<Value> {
+async fn post_push(State(db): State<Db>, Json(bundle): Json<HubBundle>) -> ApiResult<Value> {
     let store = db.lock().unwrap();
     let (blobs, stacks, changes) = store.import_bundle(&bundle)?;
     Ok(Json(json!({
@@ -283,23 +298,25 @@ pub async fn run(store: Store, port: u16) -> Result<()> {
 
     let app = Router::new()
         // ── read ───────────────────────────────────────────────────────────
-        .route("/api/vcs/status",                get(get_status))
-        .route("/api/vcs/changes",               get(get_changes))
-        .route("/api/vcs/stacks",                get(get_stacks))
-        .route("/api/vcs/views",                 get(get_views))
-        .route("/api/vcs/active-view",           get(get_active_view))
-        .route("/api/vcs/view/:id/files",        get(get_view_files))
-        .route("/api/vcs/view/:id/conflicts",    get(get_view_conflicts))
+        .route("/api/vcs/status", get(get_status))
+        .route("/api/vcs/changes", get(get_changes))
+        .route("/api/vcs/stacks", get(get_stacks))
+        .route("/api/vcs/views", get(get_views))
+        .route("/api/vcs/active-view", get(get_active_view))
+        .route("/api/vcs/view/:id/files", get(get_view_files))
+        .route("/api/vcs/view/:id/conflicts", get(get_view_conflicts))
+        .route("/api/vcs/export", get(get_export))
+        .route("/api/vcs/blobs/:hash", get(get_blob))
         // ── write ──────────────────────────────────────────────────────────
-        .route("/api/vcs/stacks/open",           post(post_stack_open))
-        .route("/api/vcs/stacks/:id/close",      post(post_stack_close))
-        .route("/api/vcs/stacks/:id/abandon",    post(post_stack_abandon))
-        .route("/api/vcs/edit",                  post(post_edit))
-        .route("/api/vcs/delete",                post(post_delete))
-        .route("/api/vcs/views/open",            post(post_view_open))
+        .route("/api/vcs/stacks/open", post(post_stack_open))
+        .route("/api/vcs/stacks/:id/close", post(post_stack_close))
+        .route("/api/vcs/stacks/:id/abandon", post(post_stack_abandon))
+        .route("/api/vcs/edit", post(post_edit))
+        .route("/api/vcs/delete", post(post_delete))
+        .route("/api/vcs/views/open", post(post_view_open))
         .route("/api/vcs/conflicts/:id/resolve", post(post_resolve))
         // ── inter-project ──────────────────────────────────────────────────
-        .route("/api/vcs/push",                  post(post_push))
+        .route("/api/vcs/push", post(post_push))
         .layer(cors)
         .with_state(db);
 
