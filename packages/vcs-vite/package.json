@@ -1,0 +1,14 @@
+{
+  "name": "vcs-vite",
+  "version": "0.1.0",
+  "description": "Vite plugin for vcs-spike — per-session source serving and HMR for agent workflows",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "keywords": ["vite", "vcs", "agent", "hmr", "multi-session"],
+  "peerDependencies": {
+    "vite": ">=4"
+  }
+}
