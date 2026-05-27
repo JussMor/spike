@@ -1,6 +1,12 @@
-# vcs-openai — OpenAI Codex / GPT-4o integration
+# vcs-openai — OpenAI tools and hub API integration
 
-Ready-made OpenAI function definitions and plugin manifest for vcs-spike.
+Ready-made OpenAI function definitions and hub API schemas for vcs-spike.
+
+This is not the Codex plugin surface. Codex should use the local MCP server in
+`packages/vcs-mcp` plus `skill/SKILL.md`, because Codex needs filesystem-local
+tools that can open stacks, record edits, checkout changes, and sync stores.
+The `ai-plugin.json` file is a legacy/custom-GPT action manifest for HTTP hub
+access.
 
 ## Quick start
 
@@ -50,7 +56,7 @@ vcs serve --port 7474
 # Then: GET http://localhost:7474/openapi.yaml
 ```
 
-### `ai-plugin.json` — ChatGPT plugin manifest
+### `ai-plugin.json` — legacy/custom GPT action manifest
 
 Points to the hub's OpenAPI spec. Useful for custom GPT actions.
 
