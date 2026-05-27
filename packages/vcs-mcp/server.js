@@ -94,8 +94,11 @@ const TOOLS = [
   {
     name: 'vcs_status',
     description:
-      'Check whether the vcs store is initialised in the current project. ' +
-      'Call this first to know if you need to run vcs_init.',
+      'Check whether the vcs store is initialised AND whether any other sessions left ' +
+      'open stacks. ALWAYS call this at the start of every task. ' +
+      'If the response includes open_stacks (non-empty array), another Claude Code session ' +
+      'or agent left work in progress — ask the user whether to merge, abandon, or ignore ' +
+      'those stacks before starting new work. Never silently ignore open_stacks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -350,6 +353,95 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'vcs_session_open',
+    description:
+      'Register this Claude Code session with the vcs store. ' +
+      'Call ONCE at the very start of every chat session, before vcs_stack_open. ' +
+      'Returns a session_id — save it for the whole chat. ' +
+      'Pass port if this session will run a dev-server (e.g. 5173) so vcs_overview ' +
+      'can show which port each agent is using without port collisions.',
+    inputSchema: {
+      type: 'object',
+      required: ['agent_id'],
+      properties: {
+        agent_id: {
+          type: 'string',
+          description: 'Unique ID for this agent session, e.g. "claude-code-feature-auth".',
+        },
+        port: {
+          type: 'number',
+          description: 'Dev-server port this session will use (e.g. 5173, 5174). Optional.',
+        },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_session_close',
+    description: 'Mark this session as done. Call when the task is complete.',
+    inputSchema: {
+      type: 'object',
+      required: ['session_id'],
+      properties: {
+        session_id: { type: 'string' },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_session_phase',
+    description:
+      'Set the current session phase: working | testing | done. ' +
+      'Call with phase=testing when you are about to run tests or start a dev-server. ' +
+      'While any session is in testing phase, other sessions must NOT merge their stacks — ' +
+      'vcs_overview will show the gate. Call with phase=done when validation passes.',
+    inputSchema: {
+      type: 'object',
+      required: ['session_id', 'phase'],
+      properties: {
+        session_id: { type: 'string' },
+        phase: {
+          type: 'string',
+          enum: ['working', 'testing', 'done'],
+          description: 'working = still editing | testing = validating, blocks merges | done = ready to merge',
+        },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_touching',
+    description:
+      'Check which other open stacks are currently editing a given file. ' +
+      'Call after vcs_edit to get immediate collision warnings — no view needed. ' +
+      'Returns other_stacks: [] if you are the only one touching this file.',
+    inputSchema: {
+      type: 'object',
+      required: ['path'],
+      properties: {
+        path:      { type: 'string', description: 'File path to check.' },
+        stack_id:  { type: 'string', description: 'Your stack (excluded from results).' },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_overview',
+    description:
+      'Return a complete picture of all agent activity in this project RIGHT NOW: ' +
+      'active sessions, what files each agent is touching, and which files will ' +
+      'conflict when stacks are merged. ' +
+      'This is the primary tool for narrating multi-agent state to the human — ' +
+      'no browser required. Call this whenever the user asks "what is happening" ' +
+      'or "what are the agents doing".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
 ]
 
 // ── Tool handlers ──────────────────────────────────────────────────────────
@@ -364,13 +456,32 @@ function handleTool(name, args) {
         if (r?.stack_id) {
           runVcs([...store, 'stack', 'abandon', r.stack_id])
         }
-        return { initialised: true, binary: BIN }
+        // Enumerate open stacks so new sessions can detect in-progress work
+        // from interrupted sessions and avoid silently ignoring those changes.
+        let openStacks = []
+        try {
+          const ls = runVcs([...store, 'stack', 'ls', '--status', 'open'])
+          // Filter out the status-check stack we just abandoned (already gone)
+          openStacks = (Array.isArray(ls) ? ls : []).filter(
+            s => s.agent_id !== '__status_check__'
+          )
+        } catch (_) { /* store may be empty — not an error */ }
+
+        const result = { initialised: true, binary: BIN, open_stacks: openStacks }
+        if (openStacks.length > 0) {
+          result.warning =
+            `${openStacks.length} stack(s) from other sessions are still OPEN. ` +
+            `Before starting new work, open a view over all open stacks ` +
+            `(vcs_view_open) and check for conflicts (vcs_view_conflicts). ` +
+            `If a stack belongs to an interrupted session, abandon it with vcs_stack_abandon.`
+        }
+        return result
       } catch (e) {
         const msg = e.message ?? ''
         if (msg.includes('not initialised') || msg.includes('NotInitialised')) {
           return { initialised: false, binary: BIN, message: 'Run vcs_init first.' }
         }
-        return { initialised: true, binary: BIN }
+        return { initialised: true, binary: BIN, open_stacks: [] }
       }
     }
 
@@ -382,7 +493,14 @@ function handleTool(name, args) {
     case 'vcs_stack_open': {
       const a = ['stack', 'open', '--agent', args.agent_id, ...store]
       if (args.base_change_id) a.push('--base', args.base_change_id)
-      return runVcs(a)
+      const result = runVcs(a)
+      // Auto-link the new stack to the session if one was registered
+      if (args.session_id && result?.stack_id) {
+        try {
+          runVcs([...store, 'session', 'link-stack', args.session_id, result.stack_id])
+        } catch (_) { /* non-fatal */ }
+      }
+      return result
     }
 
     case 'vcs_stack_close':
@@ -467,6 +585,27 @@ function handleTool(name, args) {
 
     case 'vcs_pull':
       return runVcs([...store, 'pull', args.remote])
+
+    case 'vcs_session_open': {
+      const a = [...store, 'session', 'open', '--agent', args.agent_id]
+      if (args.port) a.push('--port', String(args.port))
+      return runVcs(a)
+    }
+
+    case 'vcs_session_close':
+      return runVcs([...store, 'session', 'close', args.session_id])
+
+    case 'vcs_session_phase':
+      return runVcs([...store, 'session', 'phase', args.session_id, args.phase])
+
+    case 'vcs_touching': {
+      const a = [...store, 'touching', args.path]
+      if (args.stack_id) a.push('--stack', args.stack_id)
+      return runVcs(a)
+    }
+
+    case 'vcs_overview':
+      return runVcs([...store, 'overview'])
 
     default:
       throw new Error(`Unknown tool: ${name}`)

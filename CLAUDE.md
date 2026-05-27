@@ -10,24 +10,40 @@ You have vcs tools available via MCP. Use them for every file modification.
 ✅  vcs_edit(stackId, "src/foo.ts", content, { reason: "why" })  ← tracked
 ```
 
-## Your workflow on every task
+## Your workflow on every task (multi-session aware)
 
 ```
-1. vcs_status()                          → confirm store is initialised
-   If not: vcs_init()
+0. vcs_session_open({ agent_id: "claude-code-<task-slug>" })
+   → register THIS session. Save session_id for the whole chat.
 
-2. vcs_stack_open({ agent_id: "claude-code-<task-slug>" })
-   → save the returned stack_id for this entire task
+1. vcs_status()                          → check store + existing open stacks
+   If not initialised: vcs_init()
+
+   ⚠️  CHECK open_stacks in the response.
+   If open_stacks is non-empty, other sessions have work in progress:
+
+   a) Call vcs_overview() to see the full picture — which agents, which files
+   b) Ask the user: "Session <agent_id> has an open stack touching <files>.
+      Should I (A) merge/check for conflicts, (B) abandon it, or (C) ignore it?"
+   c) If A — vcs_view_open({ stack_ids: [existing..., myStack] })
+             then vcs_view_conflicts and REPORT — never resolve silently
+   d) If B — vcs_stack_abandon({ stack_id: orphanedId })
+
+2. vcs_stack_open({ agent_id: "...", session_id })
+   → stack auto-linked to the session
 
 3. For each file you create or modify:
    vcs_edit({ stack_id, path, content, reason: "precise reason" })
-   vcs_delete({ stack_id, path, reason })
-   vcs_rename({ stack_id, from, to, content, reason })
+   → after EACH edit, check vcs_touching({ path, stack_id })
+   → if other_stacks is non-empty, IMMEDIATELY tell the user:
+     "⚡ <other-agent> is also editing <path> — conflict likely on merge"
 
 4. vcs_stack_close({ stack_id })         → when task is done
+   vcs_session_close({ session_id })     → deregister this session
 
 5. On cancellation or error:
-   vcs_stack_abandon({ stack_id })       → mark stack dead, never close it
+   vcs_stack_abandon({ stack_id })       → mark stack dead
+   vcs_session_close({ session_id })     → always close the session
 ```
 
 ## Intent (the "reason" field)
@@ -97,12 +113,31 @@ cd examples/tanstack-vite && npm run e2e   # Playwright e2e
 ## Useful vcs commands (CLI reference)
 
 ```bash
-vcs init                                    # initialise .vcs/
-vcs stack open --agent my-agent --json      # open stack
+# Session lifecycle (multi-session)
+vcs session open --agent my-agent --json    # register session → session_id
+vcs session close <session_id>             # done
+vcs session ls --json                      # list all sessions
+
+# Overview — see every agent, every file, every collision
+vcs overview --json                        # full multi-agent picture
+
+# Per-file collision check (after each edit)
+vcs touching src/foo.ts --stack <stack_id> --json
+
+# Stack and edit
+vcs init
+vcs stack open --agent my-agent --json
 vcs edit <stack> src/foo.ts \
   --content-file /tmp/foo.ts \
-  --reason "why"                            # record edit
-vcs view open --base "" --stacks a,b --json # merge two stacks
-vcs view conflicts <view-id> --json         # check conflicts
-vcs serve --port 7474                       # start hub for multi-project
+  --reason "why"
+vcs stack ls --status open --json         # list open stacks
+
+# Merge and conflicts
+vcs view open --base "" --stacks a,b --json
+vcs view conflicts <view-id> --json
+
+# Remote
+vcs serve --port 7474                      # hub for multi-project
+vcs remote add hub http://localhost:7474
+vcs push hub && vcs pull hub
 ```

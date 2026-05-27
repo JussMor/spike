@@ -247,20 +247,216 @@ export const vcsTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_rename',
+      description: 'Record a file rename/move in vcs.',
+      parameters: {
+        type: 'object',
+        required: ['stack_id', 'from', 'to', 'content', 'reason'],
+        properties: {
+          stack_id: { type: 'string' },
+          from:     { type: 'string', description: 'Old path.' },
+          to:       { type: 'string', description: 'New path.' },
+          content:  { type: 'string', description: 'File content at the new path.' },
+          reason:   { type: 'string' },
+          task_ref: { type: 'string' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_history',
+      description: 'Show complete change history across all stacks (newest first).',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_checkout',
+      description:
+        'Materialise the tracked file tree at a historical change ID into a directory. ' +
+        'Use this to replay or inspect what an agent produced at any point in history.',
+      parameters: {
+        type: 'object',
+        required: ['change_id'],
+        properties: {
+          change_id: { type: 'string', description: 'Change ID to materialise (from vcs_log or vcs_history).' },
+          worktree: {
+            type: 'string',
+            description: 'Directory to write files into. Defaults to current directory.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_remote_add',
+      description: 'Add or update a named remote hub URL for push/pull operations.',
+      parameters: {
+        type: 'object',
+        required: ['name', 'url'],
+        properties: {
+          name: { type: 'string', description: 'Remote name (e.g. "hub", "staging").' },
+          url:  { type: 'string', description: 'Hub URL (e.g. "http://localhost:7474").' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_push',
+      description:
+        'Push this store\'s stacks, changes, and blobs to a remote hub. ' +
+        'Use after all agents finish to share agent history cross-project.',
+      parameters: {
+        type: 'object',
+        required: ['remote'],
+        properties: {
+          remote:     { type: 'string', description: 'Named remote or direct http(s) URL.' },
+          project_id: { type: 'string', description: 'Project ID to tag the bundle with.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_pull',
+      description:
+        'Pull stacks, changes, and blobs from a remote hub into the local store. ' +
+        'Idempotent — re-pulling the same bundle is a no-op.',
+      parameters: {
+        type: 'object',
+        required: ['remote'],
+        properties: {
+          remote: { type: 'string', description: 'Named remote or direct http(s) URL.' },
+        },
+      },
+    },
+  },
+
+  // ── Multi-session tools ───────────────────────────────────────────────────
+
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_session_open',
+      description:
+        'Register this agent as an active session in the vcs store. ' +
+        'ALWAYS call this first — before vcs_status or vcs_stack_open. ' +
+        'Returns session_id. Save it for the whole chat; pass it to vcs_stack_open.',
+      parameters: {
+        type: 'object',
+        required: ['agent_id'],
+        properties: {
+          agent_id: { type: 'string', description: 'Unique agent identifier, e.g. "claude-code-feature-auth".' },
+          port: { type: 'integer', description: 'Dev-server port this session will use (optional).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_session_close',
+      description:
+        'Deregister the session when the task is complete. ' +
+        'Call this alongside vcs_stack_close when done, or on cancellation/error.',
+      parameters: {
+        type: 'object',
+        required: ['session_id'],
+        properties: {
+          session_id: { type: 'string', description: 'Session ID returned by vcs_session_open.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_session_phase',
+      description:
+        'Advance the session phase. ' +
+        'working → testing (dev-server is live; other sessions must not merge). ' +
+        'testing → done (gate lifts; other sessions may now merge). ' +
+        'The vcs-vite plugin manages this automatically — only call manually if not using the plugin.',
+      parameters: {
+        type: 'object',
+        required: ['session_id', 'phase'],
+        properties: {
+          session_id: { type: 'string', description: 'Session ID.' },
+          phase: {
+            type: 'string',
+            enum: ['working', 'testing', 'done'],
+            description: 'New phase for the session.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_touching',
+      description:
+        'Check whether other open stacks are also editing a specific file. ' +
+        'Call this after EVERY vcs_edit. ' +
+        'If other_stacks is non-empty, warn the user immediately: ' +
+        '"⚡ <agent> is also editing <path> — conflict likely on merge".',
+      parameters: {
+        type: 'object',
+        required: ['path'],
+        properties: {
+          path: { type: 'string', description: 'Project-relative file path, e.g. "src/auth.ts".' },
+          stack_id: { type: 'string', description: 'Your current stack ID (to exclude from results).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_overview',
+      description:
+        'Return a full multi-agent picture of the store: all sessions, all open stacks, ' +
+        'hot files (files touched by multiple stacks), and a human-readable summary. ' +
+        'Call this when vcs_status shows open_stacks, or whenever you need to understand ' +
+        'what other agents are doing. The summary field can be shown directly to the user.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
 ]
 
 // ── System prompt for OpenAI agents ──────────────────────────────────────
 
 export const vcsSystemPrompt = `You are a coding agent with access to vcs-spike for structured change tracking.
 
-## Rules
+## Rules — multi-session aware
 
-1. ALWAYS open a stack before editing any files: vcs_stack_open({ agent_id: "<your-id>" })
-2. Use vcs_edit instead of writing files directly — it records your intent
-3. reason is REQUIRED on every vcs_edit. Be precise about why, not what.
-4. Close the stack when done: vcs_stack_close({ stack_id })
-5. On error or cancellation: vcs_stack_abandon({ stack_id })
-6. NEVER resolve conflicts without explicit user instruction. Report them.
+0. ALWAYS register yourself first: vcs_session_open({ agent_id: "<your-id>" }) → save session_id
+1. Check the store: vcs_status() — if open_stacks is non-empty, call vcs_overview() and report
+2. Open a stack before any edits: vcs_stack_open({ agent_id, session_id })
+3. Use vcs_edit instead of writing files directly — it records your intent
+4. reason is REQUIRED on every vcs_edit. Be precise about why, not what.
+5. After EVERY vcs_edit call vcs_touching({ path, stack_id }) — if other_stacks is non-empty,
+   warn the user: "⚡ <agent> is also editing <path> — conflict likely on merge"
+6. Close everything when done: vcs_stack_close({ stack_id }) + vcs_session_close({ session_id })
+7. On error or cancellation: vcs_stack_abandon({ stack_id }) + vcs_session_close({ session_id })
+8. NEVER resolve conflicts without explicit user instruction. Report them.
 
 ## Conflict protocol
 
@@ -268,6 +464,15 @@ If vcs_view_conflicts returns conflicts:
 - List each conflict clearly (path + which stacks disagree)
 - Stop and ask the user which version to keep
 - Only call vcs_resolve when the user explicitly says so
+
+## vcs_overview — when to use
+
+Call vcs_overview() whenever:
+- vcs_status() shows open_stacks is non-empty
+- You want to understand the full picture before merging
+- The user asks "what are the other agents doing?"
+
+The summary field in the response is human-readable — show it directly to the user.
 
 ## intent.reason examples
 
@@ -363,6 +568,49 @@ export async function handleVcsTool(name, args = {}) {
     }
     case 'vcs_log':
       return { changes: run(['log', args.stack_id]) ?? [] }
+    case 'vcs_rename': {
+      const t = tmp(args.content); try {
+        const a = ['rename', args.stack_id, args.from, args.to,
+          '--content-file', t, '--reason', args.reason]
+        if (args.task_ref) a.push('--task-ref', args.task_ref)
+        return run(a)
+      } finally { rmSync(t, { force: true }) }
+    }
+    case 'vcs_history':
+      return { changes: run(['history']) ?? [] }
+    case 'vcs_checkout': {
+      const a = ['checkout', args.change_id]
+      if (args.worktree) a.push('--worktree', args.worktree)
+      return run(a)
+    }
+    case 'vcs_remote_add':
+      return run(['remote', 'add', args.name, args.url])
+    case 'vcs_push': {
+      const a = ['push', args.remote]
+      if (args.project_id) a.push('--project-id', args.project_id)
+      return run(a)
+    }
+    case 'vcs_pull':
+      return run(['pull', args.remote])
+
+    // ── Multi-session ─────────────────────────────────────────────────────
+    case 'vcs_session_open': {
+      const a = ['session', 'open', '--agent', args.agent_id]
+      if (args.port) a.push('--port', String(args.port))
+      return run(a)
+    }
+    case 'vcs_session_close':
+      return run(['session', 'close', args.session_id])
+    case 'vcs_session_phase':
+      return run(['session', 'phase', args.session_id, args.phase])
+    case 'vcs_touching': {
+      const a = ['touching', args.path]
+      if (args.stack_id) a.push('--stack', args.stack_id)
+      return run(a)
+    }
+    case 'vcs_overview':
+      return run(['overview'])
+
     default:
       throw new Error(`Unknown vcs tool: ${name}`)
   }

@@ -200,6 +200,27 @@ enum Cmd {
         #[arg(long, short, default_value = "7474")]
         port: u16,
     },
+
+    /// Session management (multi-session tracking)
+    #[command(subcommand)]
+    Session(SessionCmd),
+
+    /// Show a full multi-agent overview — what every session is doing right now.
+    ///
+    /// Returns all active sessions, the files they are touching, and which files
+    /// will conflict when stacks are merged.  Claude calls this instead of asking
+    /// the human to open a browser.
+    Overview,
+
+    /// Check which other open stacks are currently touching a file.
+    /// Returns immediately after an edit to warn about live collisions.
+    Touching {
+        /// File path to check
+        path: String,
+        /// The calling stack (excluded from results)
+        #[arg(long)]
+        stack: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -217,6 +238,44 @@ enum StackCmd {
     Abandon { stack_id: String },
     /// Show stack info
     Info { stack_id: String },
+    /// List all stacks (optionally filter by status)
+    Ls {
+        /// Only show stacks with this status: open | closed | abandoned
+        #[arg(long)]
+        status: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Register a new agent session (call at chat start)
+    Open {
+        #[arg(long)]
+        agent: String,
+        /// Reserve a port for this session's dev-server (recorded in overview)
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Mark session done (call when task is complete)
+    Close { session_id: String },
+    /// Send a heartbeat to keep session alive
+    Heartbeat { session_id: String },
+    /// Link a stack to a session
+    LinkStack { session_id: String, stack_id: String },
+    /// Set the session phase: working | testing | done
+    ///
+    /// Phase=testing means this session is validating its output.
+    /// No other session should merge until this session reaches done.
+    Phase { session_id: String, phase: String },
+    /// Record the output directory and port this session is serving from
+    SetOutput {
+        session_id: String,
+        output_dir: String,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// List all sessions (newest first)
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -342,6 +401,36 @@ fn main() -> Result<()> {
                         );
                     },
                     || serde_json::to_value(&stk).unwrap(),
+                );
+            }
+            StackCmd::Ls { status } => {
+                let store = open_store(&sp)?;
+                let all = store.list_stacks().context("list_stacks")?;
+                let filtered: Vec<_> = match status.as_deref() {
+                    Some(filter) => all
+                        .into_iter()
+                        .filter(|s| s.status.to_string() == filter)
+                        .collect(),
+                    None => all,
+                };
+                out(
+                    json,
+                    || {
+                        if filtered.is_empty() {
+                            println!("(no stacks)");
+                        } else {
+                            for s in &filtered {
+                                println!(
+                                    "{} | {} | {} | tip={}",
+                                    &s.stack_id[..8],
+                                    s.status,
+                                    s.agent_id,
+                                    s.tip_change_id.as_deref().unwrap_or("(empty)")
+                                );
+                            }
+                        }
+                    },
+                    || serde_json::to_value(&filtered).unwrap(),
                 );
             }
         },
@@ -716,6 +805,106 @@ fn main() -> Result<()> {
             // Spin up a tokio runtime only for serve (keeps other commands synchronous)
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(serve::run(store, port))?;
+        }
+
+        Cmd::Session(s) => match s {
+            SessionCmd::Open { agent, port } => {
+                let store = open_store(&sp)?;
+                let sid = store.session_open(&agent, port).context("session_open")?;
+                out(json, || println!("{sid}"), || json!({"session_id": sid}));
+            }
+            SessionCmd::Close { session_id } => {
+                let store = open_store(&sp)?;
+                store.session_close(&session_id).context("session_close")?;
+                out(json, || println!("closed {session_id}"),
+                    || json!({"ok": true, "session_id": session_id}));
+            }
+            SessionCmd::Heartbeat { session_id } => {
+                let store = open_store(&sp)?;
+                store.session_heartbeat(&session_id).context("heartbeat")?;
+                out(json, || {}, || json!({"ok": true}));
+            }
+            SessionCmd::LinkStack { session_id, stack_id } => {
+                let store = open_store(&sp)?;
+                store.session_link_stack(&session_id, &stack_id).context("link_stack")?;
+                out(json, || println!("linked {stack_id} → session {session_id}"),
+                    || json!({"ok": true}));
+            }
+            SessionCmd::Phase { session_id, phase } => {
+                let store = open_store(&sp)?;
+                store.session_set_phase(&session_id, &phase).context("set_phase")?;
+                out(json,
+                    || println!("session {session_id} → phase={phase}"),
+                    || json!({"ok": true, "session_id": session_id, "phase": phase}));
+            }
+            SessionCmd::SetOutput { session_id, output_dir, port } => {
+                let store = open_store(&sp)?;
+                store.session_set_output(&session_id, &output_dir, port).context("set_output")?;
+                out(json,
+                    || println!("session {session_id} → output={output_dir}"),
+                    || json!({"ok": true}));
+            }
+            SessionCmd::Ls => {
+                let store = open_store(&sp)?;
+                let sessions = store.list_sessions().context("list_sessions")?;
+                out(json,
+                    || {
+                        if sessions.is_empty() {
+                            println!("(no sessions)");
+                        } else {
+                            for s in &sessions {
+                                let port_str = s.port.map(|p| format!(" ::{p}")).unwrap_or_default();
+                                println!("{} | {} | phase={} | {} | stack={}{port_str}",
+                                    &s.session_id[..8],
+                                    s.status,
+                                    s.phase,
+                                    s.agent_id,
+                                    s.stack_id.as_deref().unwrap_or("(none)"),
+                                );
+                            }
+                        }
+                    },
+                    || serde_json::to_value(&sessions).unwrap(),
+                );
+            }
+        },
+
+        Cmd::Overview => {
+            let store = open_store(&sp)?;
+            let ov = store.overview().context("overview")?;
+            out(json,
+                || {
+                    println!("{}", ov.summary);
+                    if !ov.hot_files.is_empty() {
+                        println!("\n⚡ Files that WILL conflict:");
+                        for hf in &ov.hot_files {
+                            println!("  {} ← {}", hf.path, hf.touched_by.join(", "));
+                        }
+                    }
+                },
+                || serde_json::to_value(&ov).unwrap(),
+            );
+        }
+
+        Cmd::Touching { path, stack } => {
+            let store = open_store(&sp)?;
+            let caller_stack = stack.as_deref().unwrap_or("__none__");
+            let contention = store.file_contention(&path, caller_stack)
+                .context("file_contention")?;
+            out(json,
+                || {
+                    if contention.other_stacks.is_empty() {
+                        println!("no contention on {path}");
+                    } else {
+                        println!("⚡ {} other open stack(s) are touching {}:",
+                            contention.other_stacks.len(), path);
+                        for e in &contention.other_stacks {
+                            println!("  {} ({})", e.agent_id, &e.stack_id[..8]);
+                        }
+                    }
+                },
+                || serde_json::to_value(&contention).unwrap(),
+            );
         }
     }
 

@@ -72,6 +72,24 @@ CREATE TABLE IF NOT EXISTS edit_metadata (
 
 CREATE INDEX IF NOT EXISTS idx_edit_metadata_path ON edit_metadata(path);
 
+-- ── sessions (first-class multi-session tracking) ───────────────────────
+-- One row per active Claude Code / agent session.
+-- Heartbeated by the agent while alive; status set to 'done' on close.
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id   TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    stack_id     TEXT,                        -- NULL until vcs_stack_open is called
+    started_at   INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'idle' | 'done'
+    phase        TEXT NOT NULL DEFAULT 'working', -- 'working' | 'testing' | 'done'
+    worktree     TEXT,                        -- absolute path to this session's checkout dir
+    port         INTEGER                      -- dev-server port reserved for this session
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_stack  ON sessions(stack_id);
+
 -- ── conflicts (first-class data, not error states) ────────────────────────
 CREATE TABLE IF NOT EXISTS conflicts (
     conflict_id TEXT PRIMARY KEY,
