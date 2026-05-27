@@ -145,9 +145,14 @@ function setSessionOutput(bin, storePath, sessionId, outputDir, port) {
 
 function getChangedPaths(bin, storePath, fromTip, toTip) {
   if (!fromTip || !toTip || fromTip === toTip) return []
+  // diff_chain returns [{path, op, blob_hash}] — op is create|edit|delete
   const diff = vcsRunQuiet(bin, storePath, 'diff', fromTip, toTip)
   if (!Array.isArray(diff)) return []
-  return diff.map(e => e.path).filter(Boolean)
+  // Include creates and edits (need module invalidation).
+  // Deletes trigger a full-reload below since removing a module is structural.
+  const changed = diff.filter(e => e.op !== 'delete').map(e => e.path).filter(Boolean)
+  const deleted = diff.filter(e => e.op === 'delete').map(e => e.path).filter(Boolean)
+  return { changed, deleted }
 }
 
 // ── Plugin ─────────────────────────────────────────────────────────────────
@@ -213,16 +218,24 @@ export function vcsAgentPlugin(options = {}) {
         if (!tip || tip === lastTip) return
 
         // Find which paths changed since the last known tip
-        const changed = getChangedPaths(bin, storePath, lastTip, tip)
-        const prevTip = lastTip
+        const diffResult = getChangedPaths(bin, storePath, lastTip, tip)
         lastTip = tip
 
         // Refresh view so next load() returns new content
         viewId = openView(bin, storePath, stackId)
         if (viewId) trackedPaths = new Set(getViewFiles(bin, storePath, viewId))
 
+        // getChangedPaths returns {changed, deleted} or [] on fallback
+        const changed = Array.isArray(diffResult) ? diffResult : (diffResult.changed ?? [])
+        const deleted = Array.isArray(diffResult) ? [] : (diffResult.deleted ?? [])
+
+        if (deleted.length > 0) {
+          // Deleted files require a full reload — the module graph must rebuild
+          devServer.ws.send({ type: 'full-reload' })
+          return
+        }
+
         if (changed.length === 0) {
-          // Fallback: reload everything in the view
           devServer.ws.send({ type: 'full-reload' })
           return
         }

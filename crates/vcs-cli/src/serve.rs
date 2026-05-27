@@ -59,26 +59,45 @@ use vcs_core::{HubBundle, Intent, Resolution, Store};
 
 // ── Shared state ───────────────────────────────────────────────────────────
 
-type Db = Arc<Mutex<Store>>;
+struct AppState {
+    db:    Arc<Mutex<Store>>,
+    token: Option<String>,
+}
+type Db = Arc<AppState>;
 
 // ── Error type ─────────────────────────────────────────────────────────────
 
-struct ApiError(anyhow::Error);
+struct ApiError(anyhow::Error, StatusCode);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let body = json!({ "error": self.0.to_string() });
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+        (self.1, Json(body)).into_response()
     }
 }
 
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
-        ApiError(e.into())
+        ApiError(e.into(), StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
 type ApiResult<T> = std::result::Result<Json<T>, ApiError>;
+
+/// Validate the `Authorization: Bearer <token>` header when the hub has a
+/// token configured.  Returns `Err(401)` if the token is missing or wrong.
+fn check_auth(state: &AppState, headers: &axum::http::HeaderMap) -> std::result::Result<(), ApiError> {
+    let Some(ref expected) = state.token else { return Ok(()); };
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided == format!("Bearer {expected}") {
+        Ok(())
+    } else {
+        Err(ApiError(anyhow::anyhow!("unauthorized"), StatusCode::UNAUTHORIZED))
+    }
+}
 
 // ── Request bodies ─────────────────────────────────────────────────────────
 
@@ -129,54 +148,57 @@ struct ExportQuery {
 // ── GET handlers ───────────────────────────────────────────────────────────
 
 async fn get_status(State(db): State<Db>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(json!({
         "initialised": true,
         "storePath":   store.store_path().display().to_string(),
         "mode":        "hub",
+        "auth":        db.token.is_some(),
     })))
 }
 
 async fn get_changes(State(db): State<Db>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.list_changes()?)?))
 }
 
 async fn get_edits(State(db): State<Db>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.list_edit_metadata()?)?))
 }
 
 async fn get_stacks(State(db): State<Db>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.list_stacks()?)?))
 }
 
 async fn get_views(State(db): State<Db>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.list_views()?)?))
 }
 
 async fn get_active_view(State(db): State<Db>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.latest_view()?)?))
 }
 
 async fn get_view_files(State(db): State<Db>, Path(view_id): Path<String>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(json!(store.list_files(&view_id)?)))
 }
 
 async fn get_view_conflicts(State(db): State<Db>, Path(view_id): Path<String>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.conflicts(&view_id)?)?))
 }
 
 async fn get_export(
     State(db): State<Db>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<ExportQuery>,
 ) -> ApiResult<HubBundle> {
-    let store = db.lock().unwrap();
+    check_auth(&db, &headers)?;
+    let store = db.db.lock().unwrap();
     let project_id = query.project_id.as_deref().unwrap_or("hub");
     Ok(Json(store.export_bundle(project_id)?))
 }
@@ -185,7 +207,7 @@ async fn get_blob(
     State(db): State<Db>,
     Path(hash): Path<String>,
 ) -> std::result::Result<Response, ApiError> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     let data = store.get_blob(&hash)?;
     Ok((
         StatusCode::OK,
@@ -201,13 +223,13 @@ async fn post_stack_open(
     State(db): State<Db>,
     Json(body): Json<OpenStackBody>,
 ) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     let stack_id = store.open_stack(&body.agent_id, body.base_change_id)?;
     Ok(Json(json!({ "stack_id": stack_id })))
 }
 
 async fn post_stack_close(State(db): State<Db>, Path(stack_id): Path<String>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     store.close_stack(&stack_id)?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -216,7 +238,7 @@ async fn post_stack_abandon(
     State(db): State<Db>,
     Path(stack_id): Path<String>,
 ) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     store.abandon_stack(&stack_id)?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -229,7 +251,7 @@ async fn post_edit(State(db): State<Db>, Json(body): Json<EditBody>) -> ApiResul
     if let Some(tr) = body.intent.task_ref {
         intent = intent.with_task_ref(tr);
     }
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     let change_id = store.edit(&body.stack_id, &body.path, &content, intent)?;
     Ok(Json(json!({ "change_id": change_id })))
 }
@@ -239,13 +261,13 @@ async fn post_delete(State(db): State<Db>, Json(body): Json<DeleteBody>) -> ApiR
     if let Some(tr) = body.intent.task_ref {
         intent = intent.with_task_ref(tr);
     }
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     let change_id = store.delete(&body.stack_id, &body.path, intent)?;
     Ok(Json(json!({ "change_id": change_id })))
 }
 
 async fn post_view_open(State(db): State<Db>, Json(body): Json<OpenViewBody>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     let view_id = store.open_view(body.base_change_id, &body.stack_ids)?;
     Ok(Json(json!({ "view_id": view_id })))
 }
@@ -261,26 +283,31 @@ async fn post_resolve(
         let data = B64
             .decode(&b64)
             .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))?;
-        let store = db.lock().unwrap();
+        let store = db.db.lock().unwrap();
         let hash = store.put_blob(&data)?;
         store.resolve(&conflict_id, Resolution::Merge { blob_hash: hash })?;
         return Ok(Json(json!({ "ok": true })));
     } else {
-        return Err(ApiError(anyhow::anyhow!(
-            "provide pick or merge_content_b64"
-        )));
+        return Err(ApiError(
+            anyhow::anyhow!("provide pick or merge_content_b64"),
+            StatusCode::BAD_REQUEST,
+        ));
     };
-    let store = db.lock().unwrap();
+    let store = db.db.lock().unwrap();
     store.resolve(&conflict_id, resolution)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Receive a [`HubBundle`] from a remote project and ingest it.
 ///
-/// After all projects have pushed, open a cross-project view via
-/// `POST /api/vcs/views/open` with all the stack IDs from all projects.
-async fn post_push(State(db): State<Db>, Json(bundle): Json<HubBundle>) -> ApiResult<Value> {
-    let store = db.lock().unwrap();
+/// Requires `Authorization: Bearer <token>` if the hub was started with `--token`.
+async fn post_push(
+    State(db): State<Db>,
+    headers: axum::http::HeaderMap,
+    Json(bundle): Json<HubBundle>,
+) -> ApiResult<Value> {
+    check_auth(&db, &headers)?;
+    let store = db.db.lock().unwrap();
     let (blobs, stacks, changes) = store.import_bundle(&bundle)?;
     Ok(Json(json!({
         "ok":              true,
@@ -293,8 +320,11 @@ async fn post_push(State(db): State<Db>, Json(bundle): Json<HubBundle>) -> ApiRe
 
 // ── Router ─────────────────────────────────────────────────────────────────
 
-pub async fn run(store: Store, port: u16) -> Result<()> {
-    let db: Db = Arc::new(Mutex::new(store));
+pub async fn run(store: Store, port: u16, token: Option<String>) -> Result<()> {
+    let db: Db = Arc::new(AppState {
+        db: Arc::new(Mutex::new(store)),
+        token,
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

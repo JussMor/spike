@@ -638,7 +638,7 @@ impl Store {
         Ok(chain)
     }
 
-    /// Return a simple diff summary between two change IDs.
+    /// Return a simple diff summary between two change IDs (snapshot diff).
     pub fn diff(&self, from: &ChangeId, to: &ChangeId) -> Result<Vec<DiffEntry>> {
         let from_snap = self.snapshot_at(from)?;
         let to_snap = self.snapshot_at(to)?;
@@ -660,6 +660,160 @@ impl Store {
             }
         }
         Ok(entries)
+    }
+
+    /// Walk the change chain from `to` back to `from`, returning all paths
+    /// touched in between (most-recent-wins per path).
+    ///
+    /// This is what the vcs-vite HMR poller needs: given `prevTip` and `newTip`,
+    /// find exactly which files changed so only those modules are invalidated.
+    ///
+    /// The op is derived by comparing each path against the snapshot AT `from`:
+    ///   - not-present → present hash: "create"
+    ///   - present hash → different hash: "edit"
+    ///   - present hash → not-present: "delete"
+    pub fn diff_chain(&self, from: &str, to: &str) -> Result<Vec<ChainDiffEntry>> {
+        if from == to || to.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Baseline snapshot at `from` (may be empty string = root)
+        let base_snap = if from.is_empty() {
+            HashMap::new()
+        } else {
+            self.snapshot_at(from)?
+        };
+
+        // Walk tip→from collecting first-seen (newest) state per path
+        let mut path_ops: HashMap<String, Option<String>> = HashMap::new();
+        let mut current = Some(to.to_owned());
+
+        while let Some(cid) = current {
+            if cid == from {
+                break;
+            }
+            let change = self.get_change(&cid)?;
+            for entry in self.file_entries_for_change(&cid)? {
+                path_ops.entry(entry.path).or_insert(entry.blob_hash);
+            }
+            current = change.parent_id;
+        }
+
+        let mut entries: Vec<ChainDiffEntry> = path_ops
+            .into_iter()
+            .map(|(path, after_blob)| {
+                let before = base_snap.get(&path).cloned();
+                let op = match (&before, &after_blob) {
+                    (None, Some(_)) => "create",
+                    (Some(_), None) => "delete",
+                    (Some(b), Some(a)) if b != a => "edit",
+                    _ => "noop",
+                };
+                ChainDiffEntry {
+                    path,
+                    op: op.to_owned(),
+                    blob_hash: after_blob,
+                }
+            })
+            .filter(|e| e.op != "noop")
+            .collect();
+
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(entries)
+    }
+
+    /// Garbage-collect unreferenced blobs.
+    ///
+    /// Walks every non-abandoned stack's full change chain, collects all
+    /// referenced blob hashes, then removes any blob file not in that set.
+    /// Returns the number of blobs freed.
+    pub fn gc(&self) -> Result<usize> {
+        let mut live: BTreeSet<String> = BTreeSet::new();
+
+        // Collect live blobs from all non-abandoned stacks
+        let stacks = self.list_stacks()?;
+        for stk in &stacks {
+            if stk.status == StackStatus::Abandoned {
+                continue;
+            }
+            let Some(ref tip) = stk.tip_change_id else { continue; };
+            let mut current = Some(tip.clone());
+            while let Some(cid) = current {
+                if stk.base_change_id.as_deref() == Some(cid.as_str()) {
+                    break;
+                }
+                let change = match self.get_change(&cid) {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                if let Some(h) = &change.diff_hash {
+                    live.insert(h.clone());
+                }
+                for entry in self.file_entries_for_change(&cid).unwrap_or_default() {
+                    if let Some(h) = entry.blob_hash {
+                        live.insert(h);
+                    }
+                }
+                if let Ok(Some(meta)) = self.get_edit_metadata(&cid) {
+                    if let Some(h) = meta.base_blob_hash   { live.insert(h); }
+                    if let Some(h) = meta.result_blob_hash { live.insert(h); }
+                    if let Some(h) = meta.patch_blob_hash  { live.insert(h); }
+                }
+                current = change.parent_id;
+            }
+        }
+
+        // Collect blobs referenced by conflict candidates and resolutions
+        let mut stmt = self.conn.prepare(
+            "SELECT candidates, resolution FROM conflicts",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        })?;
+        for row in rows {
+            let (candidates_json, resolution_json) = row?;
+            if let Ok(candidates) = serde_json::from_str::<Vec<Candidate>>(&candidates_json) {
+                for c in candidates {
+                    if let Some(h) = c.blob_hash { live.insert(h); }
+                }
+            }
+            if let Some(res_json) = resolution_json {
+                if let Ok(Resolution::Merge { blob_hash }) = serde_json::from_str(&res_json) {
+                    live.insert(blob_hash);
+                }
+            }
+        }
+
+        // Walk blob directory and remove unreferenced files
+        let blobs_root = self.root.join("blobs");
+        if !blobs_root.exists() {
+            return Ok(0);
+        }
+        let mut freed = 0usize;
+
+        for prefix_entry in std::fs::read_dir(&blobs_root)? {
+            let prefix_entry = prefix_entry?;
+            if !prefix_entry.file_type()?.is_dir() { continue; }
+            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
+
+            for blob_entry in std::fs::read_dir(prefix_entry.path())? {
+                let blob_entry = blob_entry?;
+                let filename = blob_entry.file_name().to_string_lossy().to_string();
+                if filename.ends_with(".tmp") { continue; }
+
+                let full_hash = format!("{prefix}{filename}");
+                if !live.contains(&full_hash) {
+                    // Ignore NotFound errors (concurrent GC or already gone)
+                    let _ = std::fs::remove_file(blob_entry.path());
+                    freed += 1;
+                }
+            }
+        }
+
+        Ok(freed)
     }
 
     // ── Blob passthrough ───────────────────────────────────────────────────
@@ -1001,6 +1155,15 @@ pub struct DiffEntry {
     pub after_hash: Option<String>,
 }
 
+/// Entry in a chain-walk diff (`vcs diff <from> <to>`).
+/// op is one of: "create" | "edit" | "delete"
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChainDiffEntry {
+    pub path: String,
+    pub op: String,
+    pub blob_hash: Option<String>,
+}
+
 impl Store {
     fn get_view(&self, view_id: &str) -> Result<View> {
         self.conn
@@ -1129,40 +1292,69 @@ impl Store {
         for (path, writers) in &touched {
             if writers.len() == 1 {
                 clean.insert(path.clone(), writers[0].1.clone());
-            } else {
-                let mut candidates = Vec::new();
-                for (sid, blob) in writers {
-                    let tip_cid = self
-                        .latest_change_for_path_in_stack(sid, path)?
-                        .unwrap_or_else(|| {
-                            self.get_stack(sid)
-                                .ok()
-                                .and_then(|s| s.tip_change_id)
-                                .unwrap_or_default()
-                        });
-                    candidates.push(Candidate {
-                        stack_id: sid.clone(),
-                        change_id: tip_cid,
-                        blob_hash: blob.clone(),
-                    });
-                }
+                continue;
+            }
 
-                if let Some(merged_blob) =
-                    self.try_merge_non_overlapping_edits(path, &candidates)?
-                {
-                    clean.insert(path.clone(), Some(merged_blob.clone()));
-                    auto_resolved.insert(
-                        path.clone(),
-                        (
-                            candidates,
-                            Resolution::Merge {
-                                blob_hash: merged_blob,
-                            },
-                        ),
-                    );
-                } else {
-                    conflicts.insert(path.clone(), candidates);
-                }
+            // ── P0.2 / P1.2: content-aware conflict detection ────────────────
+
+            // Case 1: all stacks have the same blob hash → no conflict
+            let unique_blobs: std::collections::HashSet<Option<&str>> = writers
+                .iter()
+                .map(|(_, blob)| blob.as_deref())
+                .collect();
+            if unique_blobs.len() == 1 {
+                clean.insert(path.clone(), writers[0].1.clone());
+                continue;
+            }
+
+            // Case 2: exactly one stack actually modified the file relative to
+            // the base — the others coincidentally have the same hash as base
+            // (or the base is empty and only one stack created the file).
+            let base_hash: Option<&str> = base_snap.get(path).map(String::as_str);
+            let modified: Vec<_> = writers
+                .iter()
+                .filter(|(_, blob)| blob.as_deref() != base_hash)
+                .collect();
+            if modified.len() == 1 {
+                // Only one stack changed it → use that version, no conflict
+                clean.insert(path.clone(), modified[0].1.clone());
+                continue;
+            }
+
+            // Case 3: 2+ stacks modified the file differently → build candidates
+            // and attempt non-overlapping line-level 3-way merge.
+            let mut candidates = Vec::new();
+            for (sid, blob) in writers {
+                let tip_cid = self
+                    .latest_change_for_path_in_stack(sid, path)?
+                    .unwrap_or_else(|| {
+                        self.get_stack(sid)
+                            .ok()
+                            .and_then(|s| s.tip_change_id)
+                            .unwrap_or_default()
+                    });
+                candidates.push(Candidate {
+                    stack_id: sid.clone(),
+                    change_id: tip_cid,
+                    blob_hash: blob.clone(),
+                });
+            }
+
+            if let Some(merged_blob) =
+                self.try_merge_non_overlapping_edits(path, &candidates)?
+            {
+                clean.insert(path.clone(), Some(merged_blob.clone()));
+                auto_resolved.insert(
+                    path.clone(),
+                    (
+                        candidates,
+                        Resolution::Merge {
+                            blob_hash: merged_blob,
+                        },
+                    ),
+                );
+            } else {
+                conflicts.insert(path.clone(), candidates);
             }
         }
 
@@ -1683,26 +1875,29 @@ impl Store {
             });
         }
 
-        // Find hot files: paths touched by 2+ open stacks
-        let mut path_to_agents: HashMap<String, Vec<String>> = HashMap::new();
+        // Find hot files: paths touched by 2+ open stacks.
+        // Track (agent_id, blob_hash) so we can correctly set will_conflict.
+        let mut path_to_entries: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for stk in &open_stacks {
             let snap = self.stack_snapshot(&stk.stack_id).unwrap_or_default();
-            for (path, blob) in &snap {
-                if blob.is_some() {
-                    path_to_agents
-                        .entry(path.clone())
+            for (path, blob) in snap {
+                if let Some(hash) = blob {
+                    path_to_entries
+                        .entry(path)
                         .or_default()
-                        .push(stk.agent_id.clone());
+                        .push((stk.agent_id.clone(), hash));
                 }
             }
         }
-        let mut hot_files: Vec<crate::session::HotFile> = path_to_agents
+        let mut hot_files: Vec<crate::session::HotFile> = path_to_entries
             .into_iter()
-            .filter(|(_, agents)| agents.len() > 1)
-            .map(|(path, touched_by)| crate::session::HotFile {
-                will_conflict: true,
-                path,
-                touched_by,
+            .filter(|(_, entries)| entries.len() > 1)
+            .map(|(path, entries)| {
+                let unique_hashes: std::collections::HashSet<&str> =
+                    entries.iter().map(|(_, h)| h.as_str()).collect();
+                let will_conflict = unique_hashes.len() > 1;
+                let touched_by = entries.into_iter().map(|(a, _)| a).collect();
+                crate::session::HotFile { will_conflict, path, touched_by }
             })
             .collect();
         hot_files.sort_by(|a, b| a.path.cmp(&b.path));

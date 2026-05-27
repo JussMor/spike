@@ -39,6 +39,8 @@
  *   vcs_remote_add      — configure a named remote store
  *   vcs_push            — push this store to a remote hub
  *   vcs_pull            — pull a remote hub bundle into this store
+ *   vcs_diff            — walk change chain, return files touched (HMR use-case)
+ *   vcs_gc              — garbage-collect unreferenced blobs
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -321,8 +323,9 @@ const TOOLS = [
       type: 'object',
       required: ['name', 'url'],
       properties: {
-        name: { type: 'string' },
-        url: { type: 'string' },
+        name:  { type: 'string' },
+        url:   { type: 'string' },
+        token: { type: 'string', description: 'Optional Bearer token for hub auth (stored in config.json).' },
         store_path: { type: 'string', description: 'Optional .vcs store path.' },
       },
     },
@@ -442,7 +445,49 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'vcs_diff',
+    description:
+      'Walk the change chain from from_change_id to to_change_id and return every ' +
+      'path that was touched (most-recent-wins per path). ' +
+      'Returns [{path, op, blob_hash}] where op is create|edit|delete. ' +
+      'Used by the vcs-vite HMR plugin for targeted module invalidation. ' +
+      'Pass an empty string for from_change_id to diff from the repository root.',
+    inputSchema: {
+      type: 'object',
+      required: ['from_change_id', 'to_change_id'],
+      properties: {
+        from_change_id: { type: 'string', description: 'Start of range (exclusive). Pass "" for repo root.' },
+        to_change_id:   { type: 'string', description: 'End of range (inclusive, usually the new tip).' },
+        store_path:     { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_gc',
+    description:
+      'Garbage-collect unreferenced blobs. Walks all non-abandoned stacks and their ' +
+      'change chains, collects every referenced blob hash, then removes any blob file ' +
+      'not in that set. Returns {"freed_blobs": N}. ' +
+      'Safe to run at any time — blobs are content-addressed and never mutated.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        store_path: { type: 'string' },
+      },
+    },
+  },
 ]
+
+// ── Session heartbeat intervals ───────────────────────────────────────────
+// Each open session gets a 30-second keep-alive interval so the store never
+// shows it as stale.  The interval is cleared on vcs_session_close.
+
+const sessionIntervals = new Map() // session_id → NodeJS.Timeout
+
+process.on('exit', () => {
+  for (const id of sessionIntervals.values()) clearInterval(id)
+})
 
 // ── Tool handlers ──────────────────────────────────────────────────────────
 
@@ -574,8 +619,11 @@ function handleTool(name, args) {
       return runVcs(a)
     }
 
-    case 'vcs_remote_add':
-      return runVcs([...store, 'remote', 'add', args.name, args.url])
+    case 'vcs_remote_add': {
+      const a = [...store, 'remote', 'add', args.name, args.url]
+      if (args.token) a.push('--token', args.token)
+      return runVcs(a)
+    }
 
     case 'vcs_push': {
       const a = [...store, 'push', args.remote]
@@ -589,11 +637,33 @@ function handleTool(name, args) {
     case 'vcs_session_open': {
       const a = [...store, 'session', 'open', '--agent', args.agent_id]
       if (args.port) a.push('--port', String(args.port))
-      return runVcs(a)
+      const result = runVcs(a)
+      // P1.1 — start a 30-second heartbeat to keep this session alive
+      if (result?.session_id) {
+        const sid = result.session_id
+        const storePath = args.store_path
+        const intervalId = setInterval(() => {
+          try {
+            const hbArgs = storePath
+              ? ['--store', storePath, 'session', 'heartbeat', sid]
+              : ['session', 'heartbeat', sid]
+            runVcs(hbArgs)
+          } catch (_) { /* session may have been closed externally */ }
+        }, 30_000)
+        sessionIntervals.set(sid, intervalId)
+      }
+      return result
     }
 
-    case 'vcs_session_close':
+    case 'vcs_session_close': {
+      // Clear heartbeat interval before closing
+      const intervalId = sessionIntervals.get(args.session_id)
+      if (intervalId !== undefined) {
+        clearInterval(intervalId)
+        sessionIntervals.delete(args.session_id)
+      }
       return runVcs([...store, 'session', 'close', args.session_id])
+    }
 
     case 'vcs_session_phase':
       return runVcs([...store, 'session', 'phase', args.session_id, args.phase])
@@ -606,6 +676,12 @@ function handleTool(name, args) {
 
     case 'vcs_overview':
       return runVcs([...store, 'overview'])
+
+    case 'vcs_diff':
+      return runVcs([...store, 'diff', args.from_change_id, args.to_change_id])
+
+    case 'vcs_gc':
+      return runVcs([...store, 'gc'])
 
     default:
       throw new Error(`Unknown tool: ${name}`)
