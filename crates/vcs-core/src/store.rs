@@ -1221,7 +1221,7 @@ impl Store {
     }
 
     /// Final file state produced by a single stack (path → blob_hash|None).
-    fn stack_snapshot(&self, stack_id: &str) -> Result<HashMap<String, Option<String>>> {
+    pub fn stack_snapshot(&self, stack_id: &str) -> Result<HashMap<String, Option<String>>> {
         let stk = self.get_stack(stack_id)?;
         let Some(tip) = stk.tip_change_id else {
             return Ok(HashMap::new());
@@ -1789,9 +1789,14 @@ impl Store {
     /// Check which OTHER open stacks have also touched `path`.
     /// Returns an empty vec if no contention — call after every `edit`.
     pub fn file_contention(&self, path: &str, caller_stack_id: &str) -> Result<FileContention> {
-        // Walk every open stack's full change chain (tip→base) to check whether
-        // the file appears anywhere, not just in the tip change.
-        // (The tip-only JOIN missed files edited in earlier changes of the stack.)
+        // Resolve the caller's current blob hash for this file.
+        // If the caller hasn't touched the file yet, caller_blob is None (new file or untracked).
+        let caller_snap = self.stack_snapshot(caller_stack_id).unwrap_or_default();
+        let caller_blob: Option<&str> = caller_snap
+            .get(path)
+            .and_then(|opt| opt.as_deref());
+
+        // Walk every OTHER open stack's full change chain.
         let open_stacks = self.list_stacks()?.into_iter()
             .filter(|s| s.status == crate::stack::StackStatus::Open
                      && s.stack_id != caller_stack_id)
@@ -1800,32 +1805,44 @@ impl Store {
         let mut other_stacks = Vec::new();
         for stk in open_stacks {
             let snap = self.stack_snapshot(&stk.stack_id).unwrap_or_default();
-            // blob_hash = Some(hash) means file exists; None means deleted/not present
-            if matches!(snap.get(path), Some(Some(_))) {
-                // Find the change_id where this path was most recently touched
-                let change_id = snap.keys()
-                    .find(|p| p.as_str() == path)
-                    .and_then(|_| {
-                        // Walk chain to find the first (most recent) change that touched path
-                        let mut cur = stk.tip_change_id.clone();
-                        while let Some(ref cid) = cur {
-                            if stk.base_change_id.as_deref() == Some(cid.as_str()) { break; }
-                            let entries = self.file_entries_for_change(cid).unwrap_or_default();
-                            if entries.iter().any(|e| e.path == path && e.blob_hash.is_some()) {
-                                return Some(cid.clone());
-                            }
-                            cur = self.get_change(cid).ok().and_then(|c| c.parent_id);
-                        }
-                        None
-                    })
-                    .unwrap_or_default();
+            let their_blob: Option<&str> = snap.get(path).and_then(|opt| opt.as_deref());
 
-                other_stacks.push(ContentionEntry {
-                    stack_id:  stk.stack_id.clone(),
-                    agent_id:  stk.agent_id.clone(),
-                    change_id,
-                });
+            // Skip if this stack doesn't have the file at all
+            if their_blob.is_none() { continue; }
+
+            // ── Content-aware collision gate ──────────────────────────────
+            // Only report contention when the content ACTUALLY DIFFERS.
+            // Same blob hash = same bytes = no real conflict possible on merge.
+            //
+            // If the caller hasn't touched the file yet (caller_blob == None)
+            // we do report it: the other agent has a modified version that the
+            // caller is about to write over — worth knowing, even pre-edit.
+            if caller_blob.is_some() && caller_blob == their_blob {
+                continue; // identical content — not a collision
             }
+
+            // Find the change_id where this stack most recently touched the file
+            let change_id = {
+                let mut cur = stk.tip_change_id.clone();
+                let mut found = String::new();
+                while let Some(ref cid) = cur {
+                    if stk.base_change_id.as_deref() == Some(cid.as_str()) { break; }
+                    let entries = self.file_entries_for_change(cid).unwrap_or_default();
+                    if entries.iter().any(|e| e.path == path && e.blob_hash.is_some()) {
+                        found = cid.clone();
+                        break;
+                    }
+                    cur = self.get_change(cid).ok().and_then(|c| c.parent_id);
+                }
+                found
+            };
+
+            other_stacks.push(ContentionEntry {
+                stack_id:  stk.stack_id.clone(),
+                agent_id:  stk.agent_id.clone(),
+                change_id,
+                blob_hash: their_blob.map(str::to_owned),
+            });
         }
 
         Ok(FileContention {

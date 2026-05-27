@@ -4,6 +4,7 @@
 //! Human output is plain text; JSON output is newline-terminated JSON.
 
 mod serve;
+mod watch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -124,6 +125,38 @@ enum Cmd {
         tool_call: Option<String>,
     },
 
+    /// Agent-safe edit: reads the current disk file as the base, seeds it into the
+    /// stack if not already present, then records new content.  Never writes disk.
+    ///
+    /// This is the recommended way for agents to record edits because:
+    ///   1. The disk base is preserved → 3-way merge has full context
+    ///   2. If content equals disk → no change recorded (idempotent)
+    ///   3. If another agent already seeded this file → uses the stack base
+    ///
+    /// Use `vcs edit` only when you are creating a brand-new file that doesn't
+    /// exist on disk yet.
+    EditFromDisk {
+        /// Stack to record the edit in
+        stack_id: String,
+        /// File path relative to the project root (also the disk path to seed from)
+        path: String,
+        /// Read new content from this file (must differ from the disk base)
+        #[arg(long)]
+        content_file: Option<PathBuf>,
+        /// Read new content from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Reason for the edit (required)
+        #[arg(long)]
+        reason: String,
+        /// Project root for reading the disk base (default: CWD)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Optional task reference
+        #[arg(long)]
+        task_ref: Option<String>,
+    },
+
     /// Record a file deletion
     Delete {
         stack_id: String,
@@ -232,6 +265,39 @@ enum Cmd {
     /// referenced blob hash, then removes any blob file not in that set.
     /// Safe to run at any time — content-addressed blobs are never mutated.
     Gc,
+
+    /// Watch a directory and auto-commit file saves to a stack (human dev UX).
+    ///
+    /// Every time you save a file, it is automatically committed to the given
+    /// stack in the vcs store. Useful when you are editing files on disk and
+    /// want changes tracked in real-time without calling `vcs edit` manually.
+    ///
+    /// Ignored by default: .vcs/ .git/ node_modules/ target/ .next/ dist/
+    Watch {
+        /// Stack to commit changes into
+        #[arg(long)]
+        stack: String,
+        /// Directory to watch (default: current directory)
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// Additional top-level directories to ignore (can repeat)
+        #[arg(long = "ignore", value_name = "DIR")]
+        ignores: Vec<String>,
+        /// Close the stack when Ctrl+C is pressed (default: leave it open)
+        #[arg(long)]
+        close_on_exit: bool,
+        /// Debounce window in milliseconds (default: 50)
+        #[arg(long, default_value = "50")]
+        debounce_ms: u64,
+    },
+
+    /// Manage API tokens for the hub server (multi-token ACL).
+    ///
+    /// Tokens are stored in <store>/tokens.json.  When at least one token is
+    /// configured, `vcs serve` requires `Authorization: Bearer <token>` on all
+    /// write endpoints.  Read-only tokens can call GET endpoints but not POST.
+    #[command(subcommand)]
+    Token(TokenCmd),
 }
 
 #[derive(Subcommand)]
@@ -334,6 +400,27 @@ enum ViewCmd {
         #[arg(long)]
         merge_file: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum TokenCmd {
+    /// Add or update a named API token.
+    ///
+    /// The token value is stored in <store>/tokens.json alongside any remotes.
+    /// Use `--read-only` to restrict this token to GET endpoints only.
+    Add {
+        /// Human-readable name for this token (e.g. "ci", "dashboard-viewer")
+        name: String,
+        /// The secret token value (sent as `Authorization: Bearer <value>`)
+        value: String,
+        /// Restrict to read-only operations (GET endpoints only)
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Remove a named token.
+    Remove { name: String },
+    /// List configured tokens (names and permissions — values are hidden).
+    Ls,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────
@@ -478,6 +565,75 @@ fn main() -> Result<()> {
                 json,
                 || println!("{change_id}"),
                 || json!({"change_id": change_id}),
+            );
+        }
+
+        Cmd::EditFromDisk {
+            stack_id,
+            path,
+            content_file,
+            stdin,
+            reason,
+            root,
+            task_ref,
+        } => {
+            let new_content = read_content(content_file, stdin)?;
+            let root_dir = root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let disk_path = safe_join(&root_dir, &path)?;
+
+            let store = open_store(&sp)?;
+
+            // Check if this stack has already touched the file (has its own base)
+            let snap = store.stack_snapshot(&stack_id).unwrap_or_default();
+            let already_touched = snap.contains_key(&path);
+
+            let seeded_change_id: Option<String> = if !already_touched && disk_path.exists() {
+                let disk_content = std::fs::read(&disk_path)
+                    .with_context(|| format!("reading disk base {}", disk_path.display()))?;
+                // If the new content IS the disk content, nothing to record
+                if disk_content == new_content {
+                    out(
+                        json,
+                        || println!("no change (content equals disk base)"),
+                        || json!({
+                            "ok": true,
+                            "no_change": true,
+                            "path": &path,
+                            "base_source": "disk",
+                            "message": "content equals disk base; no vcs change recorded",
+                        }),
+                    );
+                    return Ok(());
+                }
+                // Seed disk content as the base so 3-way merge has context
+                let seed_intent = Intent::new(&format!("seed disk base for {path}"));
+                let cid = store.edit(&stack_id, &path, &disk_content, seed_intent)
+                    .context("seed disk base")?;
+                Some(cid)
+            } else {
+                None
+            };
+
+            let mut intent = Intent::new(&reason);
+            if let Some(tr) = task_ref {
+                intent = intent.with_task_ref(tr);
+            }
+            let change_id = store.edit(&stack_id, &path, &new_content, intent)
+                .context("edit-from-disk")?;
+
+            let base_source = if already_touched { "stack" }
+                else if disk_path.exists() { "disk" }
+                else { "new-file" };
+
+            out(
+                json,
+                || println!("{change_id}"),
+                || json!({
+                    "change_id": change_id,
+                    "path": &path,
+                    "base_source": base_source,
+                    "seeded_base_change_id": seeded_change_id,
+                }),
             );
         }
 
@@ -835,12 +991,24 @@ fn main() -> Result<()> {
             // Ensure the hub store exists
             let store = Store::open_or_init(&sp).context("opening hub store")?;
             println!("vcs hub store: {}", sp.display());
-            if token.is_some() {
-                println!("vcs hub auth: Bearer token required on push/pull");
+
+            // Build token list: --token flag (write-capable) + tokens.json entries
+            let mut serve_tokens: Vec<serve::ServeToken> = Vec::new();
+            if let Some(t) = token {
+                serve_tokens.push(serve::ServeToken { value: t, read_only: false });
             }
+            let tc = TokenConfig::load(&sp).unwrap_or_default();
+            serve_tokens.extend(tc.into_serve_tokens());
+
+            if !serve_tokens.is_empty() {
+                let rw = serve_tokens.iter().filter(|t| !t.read_only).count();
+                let ro = serve_tokens.iter().filter(|t|  t.read_only).count();
+                println!("vcs hub auth: {} write token(s), {} read-only token(s)", rw, ro);
+            }
+
             // Spin up a tokio runtime only for serve (keeps other commands synchronous)
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(serve::run(store, port, token))?;
+            rt.block_on(serve::run(store, port, serve_tokens))?;
         }
 
         Cmd::Session(s) => match s {
@@ -952,6 +1120,70 @@ fn main() -> Result<()> {
                 || json!({"ok": true, "freed_blobs": freed}),
             );
         }
+
+        Cmd::Watch {
+            stack,
+            dir,
+            ignores,
+            close_on_exit,
+            debounce_ms,
+        } => {
+            let store = open_store(&sp)?;
+            let opts = watch::WatchOptions {
+                stack_id:      stack,
+                watch_dir:     dir,
+                extra_ignores: ignores,
+                close_on_exit,
+                debounce_ms,
+            };
+            watch::run(store, opts)?;
+        }
+
+        Cmd::Token(t) => match t {
+            TokenCmd::Add { name, value, read_only } => {
+                let mut config = TokenConfig::load(&sp)?;
+                config.tokens.insert(name.clone(), TokenEntry { token: value, read_only });
+                config.save(&sp)?;
+                let ro = if read_only { " (read-only)" } else { "" };
+                out(
+                    json,
+                    || println!("token '{name}' saved{ro}"),
+                    || json!({"ok": true, "name": name, "read_only": read_only}),
+                );
+            }
+            TokenCmd::Remove { name } => {
+                let mut config = TokenConfig::load(&sp)?;
+                let removed = config.tokens.remove(&name).is_some();
+                config.save(&sp)?;
+                out(
+                    json,
+                    || {
+                        if removed { println!("removed token '{name}'"); }
+                        else       { println!("token '{name}' not found"); }
+                    },
+                    || json!({"ok": removed, "name": name}),
+                );
+            }
+            TokenCmd::Ls => {
+                let config = TokenConfig::load(&sp)?;
+                if json {
+                    // Never expose token values in JSON output
+                    let safe: BTreeMap<&str, serde_json::Value> = config
+                        .tokens
+                        .iter()
+                        .map(|(k, e)| (k.as_str(), json!({"read_only": e.read_only})))
+                        .collect();
+                    println!("{}", serde_json::to_string(&safe).unwrap());
+                } else if config.tokens.is_empty() {
+                    println!("(no tokens configured)");
+                } else {
+                    for (name, entry) in &config.tokens {
+                        let ro = if entry.read_only { "  [read-only]" } else { "  [read-write]" };
+                        println!("{name}{ro}");
+                    }
+                }
+            }
+        },
     }
 
     Ok(())
@@ -1029,6 +1261,50 @@ impl RemoteConfig {
 
 fn remote_config_path(store_path: &Path) -> PathBuf {
     store_path.join("config.json")
+}
+
+// ── Token config ───────────────────────────────────────────────────────────
+
+/// A single named API token stored in `tokens.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TokenEntry {
+    token: String,
+    #[serde(default)]
+    read_only: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct TokenConfig {
+    #[serde(default)]
+    tokens: BTreeMap<String, TokenEntry>,
+}
+
+impl TokenConfig {
+    fn load(store_path: &Path) -> Result<Self> {
+        let path = store_path.join("tokens.json");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let data = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Ok(serde_json::from_str(&data)?)
+    }
+
+    fn save(&self, store_path: &Path) -> Result<()> {
+        std::fs::create_dir_all(store_path)?;
+        let path = store_path.join("tokens.json");
+        let data = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, format!("{data}\n"))
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// Convert to the flat list that `serve::run()` expects.
+    fn into_serve_tokens(self) -> Vec<serve::ServeToken> {
+        self.tokens
+            .into_values()
+            .map(|e| serve::ServeToken { value: e.token, read_only: e.read_only })
+            .collect()
+    }
 }
 
 /// Resolve a remote name or URL to a `RemoteEntry`.

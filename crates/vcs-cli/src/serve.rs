@@ -17,6 +17,16 @@
 //!         - single view → cross-project conflict detection
 //! ```
 //!
+//! ### Multi-token ACL (P3.2)
+//!
+//! `vcs token add ci-agent <secret>` → write-capable token
+//! `vcs token add dashboard <secret> --read-only` → read-only token
+//!
+//! When any token is configured:
+//! - All POST (write) endpoints require a write-capable token
+//! - `GET /api/vcs/export` requires any valid token
+//! - Other GET endpoints remain public (metrics / dashboard use)
+//!
 //! ### Read endpoints (GET)
 //!
 //! ```
@@ -27,6 +37,7 @@
 //! GET /api/vcs/active-view
 //! GET /api/vcs/view/:id/files
 //! GET /api/vcs/view/:id/conflicts
+//! GET /api/vcs/export          ← requires any valid token when ACL is on
 //! ```
 //!
 //! ### Write endpoints (POST)
@@ -57,11 +68,22 @@ use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 use vcs_core::{HubBundle, Intent, Resolution, Store};
 
+// ── Token type (public so main.rs can build the list) ─────────────────────
+
+/// A single API token for the hub server.
+pub struct ServeToken {
+    /// The secret value sent in `Authorization: Bearer <value>`
+    pub value: String,
+    /// If true, this token can only call GET endpoints; POST returns 403.
+    pub read_only: bool,
+}
+
 // ── Shared state ───────────────────────────────────────────────────────────
 
 struct AppState {
-    db:    Arc<Mutex<Store>>,
-    token: Option<String>,
+    db:     Arc<Mutex<Store>>,
+    /// Empty = no auth required (open hub).
+    tokens: Vec<ServeToken>,
 }
 type Db = Arc<AppState>;
 
@@ -84,18 +106,57 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
 
 type ApiResult<T> = std::result::Result<Json<T>, ApiError>;
 
-/// Validate the `Authorization: Bearer <token>` header when the hub has a
-/// token configured.  Returns `Err(401)` if the token is missing or wrong.
-fn check_auth(state: &AppState, headers: &axum::http::HeaderMap) -> std::result::Result<(), ApiError> {
-    let Some(ref expected) = state.token else { return Ok(()); };
-    let provided = headers
+// ── Auth helpers ───────────────────────────────────────────────────────────
+
+/// Extract the bearer token value from the `Authorization` header.
+fn bearer(headers: &axum::http::HeaderMap) -> &str {
+    headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if provided == format!("Bearer {expected}") {
-        Ok(())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("")
+}
+
+/// Check whether the request carries any valid token.
+/// Returns `Ok(true)` if the matching token is read-only, `Ok(false)` if
+/// it's write-capable.  Returns `Err(401)` when auth is configured and no
+/// matching token is supplied.
+fn check_auth_level(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> std::result::Result<bool, ApiError> {
+    if state.tokens.is_empty() {
+        return Ok(false); // open hub — no auth required
+    }
+    let provided = bearer(headers);
+    match state.tokens.iter().find(|t| t.value == provided) {
+        Some(t) => Ok(t.read_only),
+        None => Err(ApiError(anyhow::anyhow!("unauthorized"), StatusCode::UNAUTHORIZED)),
+    }
+}
+
+/// Require any valid token (for sensitive GET endpoints like `/export`).
+fn require_any_token(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> std::result::Result<(), ApiError> {
+    check_auth_level(state, headers).map(|_| ())
+}
+
+/// Require a write-capable token for all POST/mutation endpoints.
+/// Returns `Err(401)` if no token is supplied and auth is configured.
+/// Returns `Err(403)` if the token is read-only.
+fn require_write(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> std::result::Result<(), ApiError> {
+    if check_auth_level(state, headers)? {
+        Err(ApiError(
+            anyhow::anyhow!("token is read-only — write operations not permitted"),
+            StatusCode::FORBIDDEN,
+        ))
     } else {
-        Err(ApiError(anyhow::anyhow!("unauthorized"), StatusCode::UNAUTHORIZED))
+        Ok(())
     }
 }
 
@@ -149,11 +210,15 @@ struct ExportQuery {
 
 async fn get_status(State(db): State<Db>) -> ApiResult<Value> {
     let store = db.db.lock().unwrap();
+    let token_count = db.tokens.len();
+    let ro_count = db.tokens.iter().filter(|t| t.read_only).count();
     Ok(Json(json!({
-        "initialised": true,
-        "storePath":   store.store_path().display().to_string(),
-        "mode":        "hub",
-        "auth":        db.token.is_some(),
+        "initialised":    true,
+        "storePath":      store.store_path().display().to_string(),
+        "mode":           "hub",
+        "auth":           token_count > 0,
+        "token_count":    token_count,
+        "ro_token_count": ro_count,
     })))
 }
 
@@ -187,17 +252,21 @@ async fn get_view_files(State(db): State<Db>, Path(view_id): Path<String>) -> Ap
     Ok(Json(json!(store.list_files(&view_id)?)))
 }
 
-async fn get_view_conflicts(State(db): State<Db>, Path(view_id): Path<String>) -> ApiResult<Value> {
+async fn get_view_conflicts(
+    State(db): State<Db>,
+    Path(view_id): Path<String>,
+) -> ApiResult<Value> {
     let store = db.db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.conflicts(&view_id)?)?))
 }
 
+/// Export a full [`HubBundle`] — protected when tokens are configured.
 async fn get_export(
     State(db): State<Db>,
     headers: axum::http::HeaderMap,
     Query(query): Query<ExportQuery>,
 ) -> ApiResult<HubBundle> {
-    check_auth(&db, &headers)?;
+    require_any_token(&db, &headers)?;
     let store = db.db.lock().unwrap();
     let project_id = query.project_id.as_deref().unwrap_or("hub");
     Ok(Json(store.export_bundle(project_id)?))
@@ -218,17 +287,28 @@ async fn get_blob(
 }
 
 // ── POST handlers ──────────────────────────────────────────────────────────
+//
+// Every write handler calls `require_write()` first.
+// This enforces: 401 when no valid token is supplied (if tokens are configured)
+//                403 when a read-only token is supplied
 
 async fn post_stack_open(
     State(db): State<Db>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<OpenStackBody>,
 ) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let store = db.db.lock().unwrap();
     let stack_id = store.open_stack(&body.agent_id, body.base_change_id)?;
     Ok(Json(json!({ "stack_id": stack_id })))
 }
 
-async fn post_stack_close(State(db): State<Db>, Path(stack_id): Path<String>) -> ApiResult<Value> {
+async fn post_stack_close(
+    State(db): State<Db>,
+    headers: axum::http::HeaderMap,
+    Path(stack_id): Path<String>,
+) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let store = db.db.lock().unwrap();
     store.close_stack(&stack_id)?;
     Ok(Json(json!({ "ok": true })))
@@ -236,14 +316,21 @@ async fn post_stack_close(State(db): State<Db>, Path(stack_id): Path<String>) ->
 
 async fn post_stack_abandon(
     State(db): State<Db>,
+    headers: axum::http::HeaderMap,
     Path(stack_id): Path<String>,
 ) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let store = db.db.lock().unwrap();
     store.abandon_stack(&stack_id)?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn post_edit(State(db): State<Db>, Json(body): Json<EditBody>) -> ApiResult<Value> {
+async fn post_edit(
+    State(db): State<Db>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<EditBody>,
+) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let content = B64
         .decode(&body.content_b64)
         .map_err(|e| anyhow::anyhow!("base64 decode: {e}"))?;
@@ -256,7 +343,12 @@ async fn post_edit(State(db): State<Db>, Json(body): Json<EditBody>) -> ApiResul
     Ok(Json(json!({ "change_id": change_id })))
 }
 
-async fn post_delete(State(db): State<Db>, Json(body): Json<DeleteBody>) -> ApiResult<Value> {
+async fn post_delete(
+    State(db): State<Db>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<DeleteBody>,
+) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let mut intent = Intent::new(&body.intent.reason);
     if let Some(tr) = body.intent.task_ref {
         intent = intent.with_task_ref(tr);
@@ -266,7 +358,12 @@ async fn post_delete(State(db): State<Db>, Json(body): Json<DeleteBody>) -> ApiR
     Ok(Json(json!({ "change_id": change_id })))
 }
 
-async fn post_view_open(State(db): State<Db>, Json(body): Json<OpenViewBody>) -> ApiResult<Value> {
+async fn post_view_open(
+    State(db): State<Db>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<OpenViewBody>,
+) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let store = db.db.lock().unwrap();
     let view_id = store.open_view(body.base_change_id, &body.stack_ids)?;
     Ok(Json(json!({ "view_id": view_id })))
@@ -274,9 +371,11 @@ async fn post_view_open(State(db): State<Db>, Json(body): Json<OpenViewBody>) ->
 
 async fn post_resolve(
     State(db): State<Db>,
+    headers: axum::http::HeaderMap,
     Path(conflict_id): Path<String>,
     Json(body): Json<ResolveBody>,
 ) -> ApiResult<Value> {
+    require_write(&db, &headers)?;
     let resolution = if let Some(sid) = body.pick {
         Resolution::Pick { stack_id: sid }
     } else if let Some(b64) = body.merge_content_b64 {
@@ -299,14 +398,13 @@ async fn post_resolve(
 }
 
 /// Receive a [`HubBundle`] from a remote project and ingest it.
-///
-/// Requires `Authorization: Bearer <token>` if the hub was started with `--token`.
+/// Requires a write-capable token when ACL is configured.
 async fn post_push(
     State(db): State<Db>,
     headers: axum::http::HeaderMap,
     Json(bundle): Json<HubBundle>,
 ) -> ApiResult<Value> {
-    check_auth(&db, &headers)?;
+    require_write(&db, &headers)?;
     let store = db.db.lock().unwrap();
     let (blobs, stacks, changes) = store.import_bundle(&bundle)?;
     Ok(Json(json!({
@@ -320,10 +418,10 @@ async fn post_push(
 
 // ── Router ─────────────────────────────────────────────────────────────────
 
-pub async fn run(store: Store, port: u16, token: Option<String>) -> Result<()> {
+pub async fn run(store: Store, port: u16, tokens: Vec<ServeToken>) -> Result<()> {
     let db: Db = Arc::new(AppState {
         db: Arc::new(Mutex::new(store)),
-        token,
+        tokens,
     });
 
     let cors = CorsLayer::new()

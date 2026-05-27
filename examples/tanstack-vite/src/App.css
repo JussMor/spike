@@ -41,9 +41,42 @@ code { font-family: var(--mono); font-size: 0.9em; color: var(--accent); }
 .change-path { font-family: var(--mono); font-size: 12px; font-weight: 500; }
 .change-reason { grid-column: 2; font-size: 12px; color: var(--text-muted); }
 .change-meta { grid-column: 2; font-family: var(--mono); font-size: 10px; color: #555577; }
-.conflict-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
-.conflict-item { padding: 12px; border-radius: var(--radius); border: 1px solid #5a1a1a; background: #1a0a0a; }
-.conflict-path { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--red); margin-bottom: 8px; }
-.conflict-candidates { list-style: none; display: flex; flex-direction: column; gap: 4px; }
-.conflict-candidate { font-family: var(--mono); font-size: 11px; color: var(--text-muted); padding: 3px 6px; background: #2a0a0a; border-radius: 3px; }
+/* ── Conflict panel (P2.2) ─────────────────────────────────────────────── */
 .no-conflicts { color: var(--green); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.conflict-summary { font-size: 12px; margin-bottom: 12px; padding: 6px 10px; border-radius: 4px; }
+.conflict-summary-warn { background: #2d1010; color: var(--red); border: 1px solid #5a1a1a; }
+.conflict-summary-ok   { background: #0d2a14; color: var(--green); border: 1px solid #1a5a2a; }
+.conflict-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+.conflict-item { padding: 14px; border-radius: var(--radius); border: 1px solid #5a1a1a; background: #1a0a0a; }
+.conflict-item.conflict-resolved { border-color: #1a5a2a; background: #0a1a0a; }
+.conflict-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.conflict-icon { font-size: 14px; }
+.conflict-path { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--red); flex: 1; }
+.conflict-resolved .conflict-path { color: var(--green); }
+.conflict-badge { font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+.badge-conflict { background: #450a0a; color: var(--red); }
+.badge-resolved { background: #14532d; color: var(--green); }
+/* Candidates */
+.conflict-candidates { list-style: none; display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.conflict-candidate { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #2a0a0a; border-radius: 4px; }
+.candidate-info { display: flex; align-items: center; gap: 8px; flex: 1; }
+.candidate-label { font-size: 11px; font-weight: 700; color: var(--yellow); font-family: var(--mono); min-width: 16px; }
+.candidate-stack { font-size: 11px; color: #60a5fa; }
+.candidate-blob  { font-size: 11px; color: var(--text-muted); }
+/* Buttons */
+.btn { padding: 4px 12px; border-radius: 4px; border: 1px solid transparent; cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity 0.15s; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-pick { background: #1c3557; color: #60a5fa; border-color: #2a4a6a; }
+.btn-pick:hover:not(:disabled) { background: #2a4a6a; }
+.btn-merge-toggle { background: transparent; color: var(--text-muted); border-color: var(--border); font-size: 11px; }
+.btn-merge-toggle:hover { color: var(--text); border-color: var(--text-muted); }
+.btn-merge-submit { background: var(--accent-dim); color: #c4b8ff; border-color: var(--accent); }
+.btn-merge-submit:hover:not(:disabled) { background: var(--accent); }
+.btn-merge-cancel { background: transparent; color: var(--text-muted); border-color: var(--border); margin-left: 6px; }
+/* Merge editor */
+.conflict-merge-zone { margin-top: 6px; }
+.conflict-merge-editor { display: flex; flex-direction: column; gap: 8px; }
+.merge-textarea { width: 100%; background: #0f0f13; border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: var(--mono); font-size: 11px; padding: 8px; resize: vertical; outline: none; }
+.merge-textarea:focus { border-color: var(--accent); }
+.merge-actions { display: flex; align-items: center; }
+.conflict-error { margin-top: 8px; font-size: 11px; color: var(--red); }
