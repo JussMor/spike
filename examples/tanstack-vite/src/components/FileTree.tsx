@@ -21,11 +21,11 @@ export function FileTree() {
   if (!files?.length) return <p className="empty">No files tracked yet.</p>
 
   return (
-    <ul className="file-list">
+    <ul className="file-list" data-testid="file-tree">
       {files.map(f => (
-        <li key={f} className="file-item">
+        <li key={f} className="file-item" data-testid="file-item">
           <span className="file-icon">{fileIcon(f)}</span>
-          {f}
+          <span data-testid="file-path">{f}</span>
         </li>
       ))}
     </ul>

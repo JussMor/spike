@@ -10,27 +10,28 @@ export function ConflictPanel() {
 
   if (!conflicts?.length) {
     return (
-      <p className="no-conflicts">
+      <p className="no-conflicts" data-testid="no-conflicts">
         <span>✓</span> No conflicts — all stacks merge cleanly.
       </p>
     )
   }
 
   return (
-    <ul className="conflict-list">
+    <ul className="conflict-list" data-testid="conflict-list">
       {conflicts.map(c => (
         <li
           key={c.conflict_id}
+          data-testid={c.resolution ? 'conflict-resolved' : 'conflict-unresolved'}
           className={`conflict-item ${c.resolution ? 'conflict-resolved' : ''}`}
         >
-          <div className="conflict-path">
+          <div className="conflict-path" data-testid="conflict-path">
             {c.resolution ? '✓ ' : '⚡ '}
             {c.path}
             {c.resolution ? ' (resolved)' : ' (unresolved)'}
           </div>
-          <ul className="conflict-candidates">
+          <ul className="conflict-candidates" data-testid="conflict-candidates">
             {c.candidates.map((cand, i) => (
-              <li key={i} className="conflict-candidate">
+              <li key={i} className="conflict-candidate" data-testid="conflict-candidate">
                 stack {cand.stack_id.slice(0, 8)} · blob {(cand.blob_hash ?? 'deleted').slice(0, 8)}
               </li>
             ))}

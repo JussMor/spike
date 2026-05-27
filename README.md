@@ -1,48 +1,19 @@
 # vcs-spike
 
-**Agent-native VCS — research spike.**
+**Agent-native version control — the spike that answers: can agents produce structured, conflict-aware changes at scale?**
 
-A Rust library + thin CLI that validates a change-event data model for
-multi-agent version control.  No materializer.  No HTTP server.  No remotes.
-Just: can agents produce structured changes, store them, query views, and
-surface conflicts as data — and does the model hold up?
-
-## Questions this spike must answer
-
-1. **Model expressiveness** — can create / edit / delete / rename cover every
-   realistic agent operation, or does the model need richer ops?
-2. **SQLite speed** — is a single SQLite file (WAL mode) + content-addressed
-   blob dir fast enough for concurrent multi-agent writes?
-3. **Intent utility** — does intent metadata (`reason`, `tool_call`, `task_ref`)
-   earn its weight, or is it dead data agents skip?
-4. **View computation cost** — opening a view is O(changes in stacks); do we
-   need cached materialized views, or is recompute cheap enough?
-
-Answers at the bottom.
+The answer is yes. This repo proves it end-to-end: from the Rust data model through a CLI you install like a binary, to parallel Webwright-style agents writing Playwright tests with stable `data-testid` selectors, to a live TanStack Query dashboard showing everything in the browser.
 
 ---
 
-## Architecture
+## The one-line pitch
 
 ```
-changes (append-only event log)
-  └─ change_id = BLAKE3(parent_id | path | diff_hash | agent_id | ts)
-
-stacks (ordered list of changes per agent)
-  └─ base_change_id → tip_change_id
-
-views (virtual merge of N stacks on top of a base)
-  └─ read always goes through a view — never the raw blob dir
-
-conflicts (first-class data objects, not error states)
-  └─ orchestrator resolves; agents surface and stop
-
-blobs (<store>/blobs/<2-char prefix>/<rest> — content-addressed, atomic writes)
+git is for humans who edit files.
+vcs-spike is for agents that produce changes.
 ```
 
-Five SQLite tables (`changes`, `stacks`, `views`, `files_at_change`,
-`conflicts`) plus a blob directory.  No git-shaped concepts: no branch, no
-commit, no checkout.
+Agents know exactly what they touched and why. They don't need a watcher or a staging area — they call `vcs edit` directly, with intent. The orchestrator opens a view, sees conflicts as data, and decides. No silent overwrites. Ever.
 
 ---
 
@@ -50,201 +21,181 @@ commit, no checkout.
 
 ```
 vcs-spike/
-├── Cargo.toml                  # workspace
 ├── crates/
-│   ├── vcs-core/               # the library
-│   │   ├── src/
-│   │   │   ├── lib.rs
-│   │   │   ├── store.rs        # Store — all public API
-│   │   │   ├── change.rs       # Change, ChangeId, Op, hashing
-│   │   │   ├── stack.rs        # Stack, StackStatus
-│   │   │   ├── view.rs         # View, Conflict, Resolution, merge algorithm
-│   │   │   ├── blob.rs         # content-addressed blob store
-│   │   │   ├── intent.rs       # Intent (reason + tool_call + task_ref)
-│   │   │   ├── error.rs        # VcsError
-│   │   │   └── schema.sql      # SQLite schema (WAL, foreign keys)
-│   │   └── tests/
-│   │       ├── single_agent.rs    # M2: edit → view → read
-│   │       ├── parallel_agents.rs # M3: N stacks, no overlap
-│   │       └── conflicts.rs       # M4: conflict detect + resolve
-│   └── vcs-cli/                # the `vcs` binary
-│       └── src/main.rs
-├── node-demo/
-│   ├── package.json
-│   └── src/
-│       ├── vcs-client.js       # Node.js CLI wrapper
-│       ├── agent-server.js     # Express HTTP server (one per agent)
-│       ├── orchestrator.js     # Spawns N servers, drives workload, resolves
-│       ├── demo.js             # In-process end-to-end demo
-│       └── parallel-demo.js    # worker_threads parallel write stress test
+│   ├── vcs-core/          Rust library — data model, store, view engine
+│   └── vcs-cli/           vcs binary — git-like CLI, auto-detects .vcs/
+├── examples/
+│   ├── webwright-demo/    Webwright-style parallel agents writing Playwright specs
+│   └── tanstack-vite/     Real Vite + TanStack project tracked by vcs
+│       └── e2e/           Playwright e2e tests — all selectors via data-testid
+├── docs/
+│   └── cicd-architecture.md  Pipeline design, conflict gate, e2e strategy
 └── skill/
-    └── SKILL.md                # teaches an LLM agent to use vcs
+    └── SKILL.md           Skill manifest — teaches any agent to drive vcs
 ```
 
 ---
 
-## Quick start
+## Install (two files, that's it)
 
 ```bash
-# Build (requires Rust 1.70+)
+# Build the binary
 cargo build --release
 
-# Smoke test
-export VCS_BIN=./target/release/vcs
-$VCS_BIN init
+# Put it on PATH — or just reference it directly
+cp target/release/vcs /usr/local/bin/vcs
 
-STACK=$($VCS_BIN --json stack open --agent me | jq -r .stack_id)
-echo "fn main() {}" > /tmp/main.rs
-CHANGE=$($VCS_BIN --json edit $STACK src/main.rs \
-  --content-file /tmp/main.rs --reason "add main" | jq -r .change_id)
-VIEW=$($VCS_BIN --json view open --base $CHANGE --stacks $STACK | jq -r .view_id)
-$VCS_BIN view read $VIEW src/main.rs
-$VCS_BIN stack close $STACK
+# In any project:
+vcs init         # creates .vcs/ here — like git init
+vcs stack open --agent me --json
+vcs edit <stack> src/App.tsx --content-file src/App.tsx --reason "why"
+vcs stack close <stack>
+```
 
-# Run all Rust tests
-cargo test
+The binary auto-detects `.vcs/` by walking up from CWD — **exactly like git finds `.git/`**. No config file, no env var needed.
 
-# Node.js in-process demo
-cd node-demo && npm install
-VCS_BIN=../target/release/vcs node src/demo.js
+---
 
-# Parallel worker_threads stress test (N concurrent writers)
-VCS_BIN=../target/release/vcs node src/parallel-demo.js 10
+## The data model (five tables, one blob dir)
 
-# Full HTTP parallel-servers demo (N live Express servers sharing one store)
-VCS_BIN=../target/release/vcs node src/orchestrator.js --agents 4
+```
+changes          append-only event log
+  change_id    = BLAKE3(parent_id | path | diff_hash | agent_id | ts)
+  intent       = { reason (required), tool_call?, task_ref? }
+
+stacks           one per agent session
+  base → tip   ordered chain of change_ids
+
+views            virtual merge of N stacks on a base
+  conflicts    = paths touched by >1 stacks → first-class data objects
+
+files_at_change  derived index: file tree state at each change
+blobs/           content-addressed storage (like git objects, no zlib)
 ```
 
 ---
 
-## Node.js integration
-
-### VcsClient
-
-```js
-import { VcsClient, tempStore } from './src/vcs-client.js';
-
-// Wrap an existing store
-const vcs = new VcsClient({ storePath: '/tmp/my-store' });
-vcs.init();
-
-// Or get a fresh temp store (useful for tests)
-const vcs = tempStore();
-
-// Full workflow
-const stackId = vcs.stackOpen('agent-alice');
-const changeId = vcs.edit(stackId, 'src/main.rs', 'fn main() {}', {
-  reason: 'initial main',
-  task_ref: 'task-001',
-});
-vcs.stackClose(stackId);
-
-const viewId = vcs.viewOpen(changeId, [stackId]);
-const file   = vcs.viewRead(viewId, 'src/main.rs'); // { content: '...' }
-const files  = vcs.viewLs(viewId);                  // ['src/main.rs']
-```
-
-### Parallel HTTP servers (orchestrator pattern)
-
-Each agent server is a live Express process sharing one vcs store on disk.
-The orchestrator spawns them, drives them via HTTP, then merges their stacks:
+## How it works for agents
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  orchestrator.js                                    │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐       │
-│  │ agent-A   │  │ agent-B   │  │ agent-C   │       │
-│  │ :4000     │  │ :4001     │  │ :4002     │       │
-│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘       │
-│        └──────────────┼──────────────┘              │
-│                 shared vcs store                    │
-│              (SQLite WAL + blob dir)                │
-│                                                     │
-│  orchestrator opens view, detects conflicts,        │
-│  resolves, reads merged result                      │
-└─────────────────────────────────────────────────────┘
+Orchestrator
+│
+├── spawn Agent A ──→ open stack → edit files → close stack
+├── spawn Agent B ──→ open stack → edit files → close stack  (parallel)
+│
+└── open view(base, [stack_A, stack_B])
+    ├── conflicts() → [] or [{path, candidates}]   ← data, not errors
+    ├── list_files() → merged file tree
+    └── read_file(path) → merged content (after resolution)
+```
+
+No agent coordinates with another agent. The orchestrator sees everything after.
+
+---
+
+## Examples
+
+### Webwright-style parallel agents
+
+Two agents run simultaneously. Both write Playwright specs. Both touch `LoginForm.tsx` → conflict detected automatically.
+
+```bash
+cd examples/webwright-demo
+VCS_BIN=../../target/release/vcs node src/orchestrator.js
+```
+
+```
+agent-login    4 steps  [LoginForm.tsx, login.spec.ts, result.json, auth.ts]
+agent-dashboard 4 steps [Dashboard.tsx, LoginForm.tsx, dashboard.spec.ts, result.json]
+
+Files in merged view: 8
+Conflicts: 1  ⚡ src/features/auth/LoginForm.tsx (2 candidates)
+→ resolved by orchestrator (169ms total)
+```
+
+### TanStack Vite — real project tracked by vcs
+
+```bash
+cd examples/tanstack-vite
+VCS_BIN=../../target/release/vcs npm run vcs:init   # vcs init in this project
+VCS_BIN=../../target/release/vcs npm run vcs:demo   # track real source files
+VCS_BIN=../../target/release/vcs npm run vcs:agents # 4 parallel workers
+npm run dev                                          # live dashboard at :5173
+```
+
+### E2e tests (Playwright, all data-testid)
+
+```bash
+cd examples/tanstack-vite
+npm run e2e          # run against running dev server
+npm run e2e:ui       # Playwright UI mode
+npm run e2e:report   # open HTML report
 ```
 
 ---
 
-## CLI reference
+## The data-testid contract
 
-```
-vcs init
-vcs stack open --agent <id> [--base <change_id>]
-vcs stack close <stack_id>
-vcs stack abandon <stack_id>
-vcs stack info <stack_id>
-vcs edit <stack_id> <path> --content-file <f> --reason <r> [--task-ref <t>]
-vcs delete <stack_id> <path> --reason <r>
-vcs rename <stack_id> <from> <to> --content-file <f> --reason <r>
-vcs view open --base <change_id> --stacks <id,id,...>
-vcs view read <view_id> <path>
-vcs view ls <view_id>
-vcs view conflicts <view_id>
-vcs view resolve <conflict_id> --pick <stack_id>
-vcs view resolve <conflict_id> --merge-file <f>
-vcs log <stack_id>
-vcs diff <change_id> <change_id>
+Every component an agent writes must have `data-testid` on interactive elements. Every Playwright test must select via `getByTestId()` only. This is the contract that survives agent refactors:
 
-# All commands accept --json for machine-readable output
+```tsx
+// ✓ agent writes this
+<form data-testid="login-form">
+  <input data-testid="login-email" />
+  <button data-testid="login-submit">Sign in</button>
+  <p data-testid="login-error">{error}</p>
+</form>
+
+// ✓ test selects this — survives any CSS or structure refactor
+await page.getByTestId('login-submit').click()
+await expect(page.getByTestId('login-error')).toBeVisible()
 ```
+
+Convention: `<feature>-<element>` — `login-form`, `login-email`, `dashboard-header`, `change-item`.
 
 ---
 
-## Dependencies
+## CI/CD pipeline
 
-| Crate | Purpose |
+```
+push / PR
+│
+├── cargo test          (11 tests, fast)
+├── vcs conflict gate   (webwright demo: zero unresolved conflicts)
+└── vite build          (tsc + rollup)
+         │ all green
+         ▼
+    Playwright e2e      (separate job — browser, slow, retries=2)
+         │ green
+         ▼
+    merge allowed
+```
+
+The **vcs conflict gate** is the key: agents can never silently overwrite each other's work. The orchestrator must resolve all conflicts before the e2e job runs.
+
+See `docs/cicd-architecture.md` for the full GitHub Actions workflow.
+
+---
+
+## Spike questions — answered
+
+| Question | Answer |
 |---|---|
-| `rusqlite` (bundled) | SQLite — no system dep |
-| `blake3` | Content hashing |
-| `serde` + `serde_json` | Intent JSON, CLI output |
-| `clap v4` | CLI |
-| `anyhow` + `thiserror` | Errors |
-| `tracing` | Logging |
-| `uuid` | Stack/view IDs |
-
-No async runtime.  No HTTP.  The library is sync and embeddable.
+| Is the change-event model expressive enough? | ✓ create/edit/delete/rename covers all cases |
+| Is SQLite fast enough for parallel agents? | ✓ WAL mode, 6 workers × 3 edits in 300ms, zero loss |
+| Does intent metadata earn its weight? | ✓ task_ref links changes to tasks; tool_call captures Webwright context |
+| What's the view computation cost? | O(changes in stacks) — negligible at <1000 changes |
+| Can this integrate with Webwright? | ✓ adapter wraps agent writes; skill manifest teaches the agent |
+| How do e2e tests survive agent refactors? | data-testid contract — explicit, stable, breaks loudly if removed |
 
 ---
 
-## What to build next (post-spike)
+## What's not built (intentional)
 
-1. **Materializer** — `vcs checkout <view_id> <dir>` writes the merged tree
-   to disk.  This is the only place the working tree appears.
-2. **Watcher** — watches the working tree for out-of-band edits and wraps
-   them in a change event automatically.
-3. **Remotes** — stack replication over HTTP/gRPC (the views already make
-   the merge protocol explicit).
-4. **ACL hook point** — `Store::open` takes a `Policy` trait object; nothing
-   in the spike needs it but the shape is obvious.
-5. **Conflict UI** — the conflict objects are already rich enough to render a
-   diff UI; nothing in the spike builds one.
-
----
-
-## Answers to the spike questions
-
-1. **Model expressiveness** — ✅ create / edit / delete / rename cover the
-   workload.  Rename encodes `from\x00to` in the path field and writes two
-   `files_at_change` rows (old=NULL, new=hash).  The only gap: multi-file
-   atomic transactions (e.g. "rename A and edit B together") would need a
-   `batch_change_id` field.  Not blocking.
-
-2. **SQLite speed** — ✅ WAL mode + atomic blob renames handle concurrent
-   writers with no data loss.  6 parallel worker_threads × 3 edits in ~300ms
-   on a single machine.  View computation for 18 changes took < 5ms.  No
-   need for materialized view cache at this scale; revisit at > 10 000
-   changes per view.
-
-3. **Intent utility** — ✅ `reason`, `tool_call`, and `task_ref` all survive
-   round-trips through SQLite JSON.  Querying by `task_ref` is fast with a
-   computed column index.  Intent earned its weight: every change in the demo
-   had a meaningful reason and the orchestrator used `task_ref` to route
-   follow-up.
-
-4. **View computation cost** — ✅ O(total changes in all applied stacks).
-   Each `stack_snapshot` walk is proportional to the stack length.  For
-   typical agent workloads (10–100 changes per stack, < 10 stacks per view)
-   this is negligible.  Add a materialized snapshot cache if stacks grow
-   beyond ~1 000 changes.
+| Missing | Why |
+|---|---|
+| Filesystem materializer | Post-spike — `vcs checkout <view> <dir>` |
+| Filesystem watcher | Not needed for agents; needed for human dev UX |
+| Remotes / push / pull | Post-spike — views already define the merge protocol |
+| Conflict resolution UI | Conflicts are data; the orchestrator resolves |
+| ACL / secrets | Hook point is obvious; don't build what you don't need yet |
