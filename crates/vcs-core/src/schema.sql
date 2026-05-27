@@ -81,7 +81,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     stack_id     TEXT,                        -- NULL until vcs_stack_open is called
     started_at   INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'active'  -- 'active' | 'idle' | 'done'
+    status       TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'idle' | 'done'
+    phase        TEXT NOT NULL DEFAULT 'working', -- 'working' | 'testing' | 'done'
+    worktree     TEXT,                        -- absolute path to this session's checkout dir
+    port         INTEGER                      -- dev-server port reserved for this session
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);

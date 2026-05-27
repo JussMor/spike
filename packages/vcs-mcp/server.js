@@ -357,9 +357,10 @@ const TOOLS = [
     name: 'vcs_session_open',
     description:
       'Register this Claude Code session with the vcs store. ' +
-      'Call ONCE at the start of every chat session, before vcs_stack_open. ' +
-      'Returns a session_id — pass it to vcs_session_close when done. ' +
-      'Sessions let vcs_overview show every agent working in this project simultaneously.',
+      'Call ONCE at the very start of every chat session, before vcs_stack_open. ' +
+      'Returns a session_id — save it for the whole chat. ' +
+      'Pass port if this session will run a dev-server (e.g. 5173) so vcs_overview ' +
+      'can show which port each agent is using without port collisions.',
     inputSchema: {
       type: 'object',
       required: ['agent_id'],
@@ -367,6 +368,10 @@ const TOOLS = [
         agent_id: {
           type: 'string',
           description: 'Unique ID for this agent session, e.g. "claude-code-feature-auth".',
+        },
+        port: {
+          type: 'number',
+          description: 'Dev-server port this session will use (e.g. 5173, 5174). Optional.',
         },
         store_path: { type: 'string' },
       },
@@ -380,6 +385,27 @@ const TOOLS = [
       required: ['session_id'],
       properties: {
         session_id: { type: 'string' },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_session_phase',
+    description:
+      'Set the current session phase: working | testing | done. ' +
+      'Call with phase=testing when you are about to run tests or start a dev-server. ' +
+      'While any session is in testing phase, other sessions must NOT merge their stacks — ' +
+      'vcs_overview will show the gate. Call with phase=done when validation passes.',
+    inputSchema: {
+      type: 'object',
+      required: ['session_id', 'phase'],
+      properties: {
+        session_id: { type: 'string' },
+        phase: {
+          type: 'string',
+          enum: ['working', 'testing', 'done'],
+          description: 'working = still editing | testing = validating, blocks merges | done = ready to merge',
+        },
         store_path: { type: 'string' },
       },
     },
@@ -560,11 +586,17 @@ function handleTool(name, args) {
     case 'vcs_pull':
       return runVcs([...store, 'pull', args.remote])
 
-    case 'vcs_session_open':
-      return runVcs([...store, 'session', 'open', '--agent', args.agent_id])
+    case 'vcs_session_open': {
+      const a = [...store, 'session', 'open', '--agent', args.agent_id]
+      if (args.port) a.push('--port', String(args.port))
+      return runVcs(a)
+    }
 
     case 'vcs_session_close':
       return runVcs([...store, 'session', 'close', args.session_id])
+
+    case 'vcs_session_phase':
+      return runVcs([...store, 'session', 'phase', args.session_id, args.phase])
 
     case 'vcs_touching': {
       const a = [...store, 'touching', args.path]

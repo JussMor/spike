@@ -252,6 +252,9 @@ enum SessionCmd {
     Open {
         #[arg(long)]
         agent: String,
+        /// Reserve a port for this session's dev-server (recorded in overview)
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Mark session done (call when task is complete)
     Close { session_id: String },
@@ -259,6 +262,18 @@ enum SessionCmd {
     Heartbeat { session_id: String },
     /// Link a stack to a session
     LinkStack { session_id: String, stack_id: String },
+    /// Set the session phase: working | testing | done
+    ///
+    /// Phase=testing means this session is validating its output.
+    /// No other session should merge until this session reaches done.
+    Phase { session_id: String, phase: String },
+    /// Record the output directory and port this session is serving from
+    SetOutput {
+        session_id: String,
+        output_dir: String,
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// List all sessions (newest first)
     Ls,
 }
@@ -793,9 +808,9 @@ fn main() -> Result<()> {
         }
 
         Cmd::Session(s) => match s {
-            SessionCmd::Open { agent } => {
+            SessionCmd::Open { agent, port } => {
                 let store = open_store(&sp)?;
-                let sid = store.session_open(&agent).context("session_open")?;
+                let sid = store.session_open(&agent, port).context("session_open")?;
                 out(json, || println!("{sid}"), || json!({"session_id": sid}));
             }
             SessionCmd::Close { session_id } => {
@@ -815,6 +830,20 @@ fn main() -> Result<()> {
                 out(json, || println!("linked {stack_id} → session {session_id}"),
                     || json!({"ok": true}));
             }
+            SessionCmd::Phase { session_id, phase } => {
+                let store = open_store(&sp)?;
+                store.session_set_phase(&session_id, &phase).context("set_phase")?;
+                out(json,
+                    || println!("session {session_id} → phase={phase}"),
+                    || json!({"ok": true, "session_id": session_id, "phase": phase}));
+            }
+            SessionCmd::SetOutput { session_id, output_dir, port } => {
+                let store = open_store(&sp)?;
+                store.session_set_output(&session_id, &output_dir, port).context("set_output")?;
+                out(json,
+                    || println!("session {session_id} → output={output_dir}"),
+                    || json!({"ok": true}));
+            }
             SessionCmd::Ls => {
                 let store = open_store(&sp)?;
                 let sessions = store.list_sessions().context("list_sessions")?;
@@ -824,9 +853,11 @@ fn main() -> Result<()> {
                             println!("(no sessions)");
                         } else {
                             for s in &sessions {
-                                println!("{} | {} | {} | stack={}",
+                                let port_str = s.port.map(|p| format!(" ::{p}")).unwrap_or_default();
+                                println!("{} | {} | phase={} | {} | stack={}{port_str}",
                                     &s.session_id[..8],
                                     s.status,
+                                    s.phase,
                                     s.agent_id,
                                     s.stack_id.as_deref().unwrap_or("(none)"),
                                 );

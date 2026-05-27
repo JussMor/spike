@@ -1,18 +1,31 @@
 //! Session tracking — first-class multi-session support.
 //!
-//! A **session** is one running Claude Code chat / agent process.
-//! Sessions register themselves via `Store::session_open` and send
-//! heartbeats via `Store::session_heartbeat`.  On close they call
-//! `Store::session_close`.  The store retains history even for dead
-//! sessions so audits can see exactly which agent touched what.
+//! # Two-server pattern
+//!
+//! Each session owns an **isolated worktree** and an optional **port**.
+//! Neither session's dev-server ever reads from the other's directory.
+//!
+//! ```text
+//! Session A (claude-code-auth)          Session B (claude-code-pay)
+//! ─────────────────────────────         ────────────────────────────
+//! phase: testing                        phase: working
+//! worktree: .vcs/worktrees/<id-a>/      worktree: .vcs/worktrees/<id-b>/
+//! port: 5173                            port: 5174
+//! dev-server ← own files only           dev-server ← own files only
+//! ```
+//!
+//! Gate rule: a session whose phase is `testing` is the authority.
+//! Other sessions MUST NOT merge until the testing session closes or
+//! transitions to `done`.
 //!
 //! # Session lifecycle
 //! ```text
-//! vcs_status()          ← see all active sessions before starting
-//! vcs_session_open()    ← register; returns session_id
-//!   vcs_stack_open()    ← open a stack, link it to the session
-//!   vcs_edit × N        ← each edit carries agent collision info
-//! vcs_session_close()   ← mark done; stack may still be open for merge
+//! vcs_session_open()       → session_id, worktree path assigned
+//! vcs_stack_open()         → stack auto-linked to session
+//! vcs_edit × N             → after each edit: vcs_touching to detect collisions
+//! vcs_session_phase testing → mark as "I am now verifying my output"
+//! [ run tests / dev server on session.port ]
+//! vcs_session_close()      → phase = done; stack stays open for merge
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +39,9 @@ pub struct Session {
     pub started_at:   i64,
     pub last_seen_at: i64,
     pub status:       String, // "active" | "idle" | "done"
+    pub phase:        String, // "working" | "testing" | "done"
+    pub worktree:     Option<String>, // absolute path to this session's private checkout
+    pub port:         Option<u16>,    // reserved dev-server port
 }
 
 /// Rich summary of a single session for display in `AgentOverview`.
@@ -35,6 +51,9 @@ pub struct SessionSummary {
     pub agent_id:       String,
     pub stack_id:       Option<String>,
     pub status:         String,
+    pub phase:          String,
+    pub worktree:       Option<String>,
+    pub port:           Option<u16>,
     pub files_touched:  Vec<String>,
     pub changes_count:  usize,
     pub started_at:     i64,
@@ -63,6 +82,8 @@ pub struct AgentOverview {
     pub hot_files:     Vec<HotFile>,
     /// Number of active sessions.
     pub active_count:  usize,
+    /// Any session currently in "testing" phase (blocks merges).
+    pub testing_session: Option<String>,
     /// Human-readable narrative Claude can present directly.
     pub summary:       String,
     pub generated_at:  i64,
