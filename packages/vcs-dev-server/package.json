@@ -1,0 +1,17 @@
+{
+  "name": "vcs-dev-server",
+  "version": "0.1.0",
+  "description": "Framework-neutral dev-server runtime for vcs-spike agent workflows",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "vcs-dev-server": "index.js"
+  },
+  "exports": {
+    ".": "./index.js"
+  },
+  "keywords": ["vcs", "agent", "dev-server", "middleware", "multi-session"],
+  "engines": {
+    "node": ">=18"
+  }
+}

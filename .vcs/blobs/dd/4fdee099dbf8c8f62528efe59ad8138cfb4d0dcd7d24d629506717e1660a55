@@ -1,0 +1,582 @@
+openapi: 3.1.0
+info:
+  title: vcs-spike hub API
+  description: |
+    Agent-native VCS hub. Start with `vcs serve --port 7474`.
+
+    All GET endpoints are read-only and compatible with the Vite plugin
+    (the tanstack-vite dashboard can point at a remote hub).
+    POST endpoints let agents push their changes to a central hub for
+    cross-project conflict detection.
+  version: 0.1.0
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:7474
+    description: Local hub (vcs serve)
+
+tags:
+  - name: status
+    description: Store health
+  - name: stacks
+    description: Agent stack lifecycle
+  - name: changes
+    description: Change log
+  - name: views
+    description: Merged views and conflict detection
+  - name: hub
+    description: Inter-project push protocol
+
+paths:
+  /api/vcs/status:
+    get:
+      tags: [status]
+      summary: Check store status
+      description: Returns whether the store is initialised and where it lives.
+      operationId: getStatus
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+  /api/vcs/changes:
+    get:
+      tags: [changes]
+      summary: List all changes
+      description: All recorded changes, newest first.
+      operationId: listChanges
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Change'
+
+  /api/vcs/edits:
+    get:
+      tags: [changes]
+      summary: List structured edit metadata
+      description: Compact per-change edit operations with base/result/patch blobs and changed line ranges.
+      operationId: listEditMetadata
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EditMetadata'
+
+  /api/vcs/stacks:
+    get:
+      tags: [stacks]
+      summary: List all stacks
+      operationId: listStacks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Stack'
+
+  /api/vcs/stacks/open:
+    post:
+      tags: [stacks]
+      summary: Open a new agent stack
+      description: Call at the start of every agent task. Returns a stack_id.
+      operationId: openStack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id]
+              properties:
+                agent_id:
+                  type: string
+                  example: claude-code-add-login
+                base_change_id:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Stack opened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stack_id:
+                    type: string
+
+  /api/vcs/stacks/{stack_id}/close:
+    post:
+      tags: [stacks]
+      summary: Close a stack (task complete)
+      operationId: closeStack
+      parameters:
+        - name: stack_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+
+  /api/vcs/stacks/{stack_id}/abandon:
+    post:
+      tags: [stacks]
+      summary: Abandon a stack (error/cancellation)
+      operationId: abandonStack
+      parameters:
+        - name: stack_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Abandoned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+
+  /api/vcs/edit:
+    post:
+      tags: [changes]
+      summary: Record a file edit
+      description: |
+        Records that the agent edited a file. Content is base64-encoded
+        so binary files are supported. intent.reason is always required.
+      operationId: recordEdit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditRequest'
+      responses:
+        '200':
+          description: Change recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  change_id:
+                    type: string
+
+  /api/vcs/delete:
+    post:
+      tags: [changes]
+      summary: Record a file deletion
+      operationId: recordDelete
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stack_id, path, intent]
+              properties:
+                stack_id: { type: string }
+                path:     { type: string }
+                intent:
+                  $ref: '#/components/schemas/Intent'
+      responses:
+        '200':
+          description: Change recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  change_id: { type: string }
+
+  /api/vcs/views:
+    get:
+      tags: [views]
+      summary: List all views
+      operationId: listViews
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/View'
+
+  /api/vcs/views/open:
+    post:
+      tags: [views]
+      summary: Open a merged view
+      description: |
+        Merges the given stacks on top of the base change. After opening,
+        call GET /api/vcs/view/{view_id}/conflicts to check for conflicts.
+      operationId: openView
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stack_ids]
+              properties:
+                base_change_id:
+                  type: string
+                  description: Pass "" for root
+                  example: ""
+                stack_ids:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: View opened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  view_id: { type: string }
+
+  /api/vcs/active-view:
+    get:
+      tags: [views]
+      summary: Get most recently opened view
+      description: Matches the Vite plugin endpoint so the React dashboard works against the hub.
+      operationId: getActiveView
+      responses:
+        '200':
+          description: View or null
+          content:
+            application/json:
+              schema:
+                nullable: true
+                oneOf:
+                  - $ref: '#/components/schemas/View'
+                  - type: 'null'
+
+  /api/vcs/view/{view_id}/files:
+    get:
+      tags: [views]
+      summary: List files in a view
+      operationId: listViewFiles
+      parameters:
+        - name: view_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: File paths
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+
+  /api/vcs/view/{view_id}/conflicts:
+    get:
+      tags: [views]
+      summary: List conflicts in a view
+      description: |
+        A conflict exists when two or more stacks edited the same file.
+        Conflicts are data — surface them, don't resolve silently.
+      operationId: listViewConflicts
+      parameters:
+        - name: view_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Conflicts (empty array = no conflicts)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Conflict'
+
+  /api/vcs/conflicts/{conflict_id}/resolve:
+    post:
+      tags: [views]
+      summary: Resolve a conflict
+      operationId: resolveConflict
+      parameters:
+        - name: conflict_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                pick:
+                  type: string
+                  description: Pick the version from this stack_id
+                merge_content_b64:
+                  type: string
+                  description: Base64-encoded merged content (alternative to pick)
+      responses:
+        '200':
+          description: Resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkResponse'
+
+  /api/vcs/push:
+    post:
+      tags: [hub]
+      summary: Push a project bundle to the hub
+      description: |
+        Receives a bundle of stacks, changes, structured edit metadata,
+        file-state rows, and blobs from a remote project and ingests them
+        into the hub store. After all projects have pushed, open a
+        cross-project view via POST /api/vcs/views/open.
+
+        Idempotent — re-pushing the same bundle is safe (INSERT OR IGNORE).
+      operationId: pushBundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HubBundle'
+      responses:
+        '200':
+          description: Bundle ingested
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:               { type: boolean }
+                  project_id:       { type: string }
+                  blobs_stored:     { type: integer }
+                  stacks_imported:  { type: integer }
+                  changes_imported: { type: integer }
+
+  /api/vcs/export:
+    get:
+      tags: [hub]
+      summary: Export this store as a hub bundle
+      description: Returns the complete structured store bundle used by vcs pull.
+      operationId: exportBundle
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Store bundle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HubBundle'
+
+  /api/vcs/blobs/{hash}:
+    get:
+      tags: [hub]
+      summary: Fetch a raw blob by hash
+      operationId: getBlob
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Raw blob bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+components:
+  schemas:
+    StatusResponse:
+      type: object
+      properties:
+        initialised: { type: boolean }
+        storePath:   { type: string }
+        mode:        { type: string, example: hub }
+
+    OkResponse:
+      type: object
+      properties:
+        ok: { type: boolean }
+
+    Intent:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: Required. Why the change was made.
+          example: "add login form with email/password validation"
+        task_ref:
+          type: string
+          nullable: true
+          description: Optional issue/task reference
+          example: "JIRA-123"
+
+    EditRequest:
+      type: object
+      required: [stack_id, path, content_b64, intent]
+      properties:
+        stack_id:
+          type: string
+        path:
+          type: string
+          description: File path (relative to project root)
+          example: src/components/LoginForm.tsx
+        content_b64:
+          type: string
+          description: Base64-encoded file content
+          format: byte
+        intent:
+          $ref: '#/components/schemas/Intent'
+
+    Change:
+      type: object
+      properties:
+        change_id:  { type: string }
+        parent_id:  { type: string, nullable: true }
+        path:       { type: string }
+        op:
+          type: string
+          enum: [create, edit, delete, rename]
+        diff_hash:  { type: string, nullable: true, description: Patch blob hash for edits/deletes/renames }
+        agent_id:   { type: string }
+        intent:     { $ref: '#/components/schemas/Intent' }
+        created_at: { type: integer, description: Unix ms }
+
+    EditMetadata:
+      type: object
+      properties:
+        change_id:        { type: string }
+        path:             { type: string }
+        base_blob_hash:   { type: string, nullable: true }
+        result_blob_hash: { type: string, nullable: true }
+        patch_blob_hash:  { type: string, nullable: true }
+        edit_kind:
+          type: string
+          enum: [create, replace_lines, delete, rename]
+        start_line:       { type: integer, nullable: true }
+        end_line:         { type: integer, nullable: true }
+        inserted_lines:   { type: integer }
+        deleted_lines:    { type: integer }
+
+    Stack:
+      type: object
+      properties:
+        stack_id:       { type: string }
+        agent_id:       { type: string }
+        base_change_id: { type: string, nullable: true }
+        tip_change_id:  { type: string, nullable: true }
+        status:
+          type: string
+          enum: [open, closed, abandoned]
+
+    View:
+      type: object
+      properties:
+        view_id:        { type: string }
+        base_change_id: { type: string }
+        applied_stacks: { type: string, description: JSON array of stack IDs }
+        state_hash:     { type: string }
+
+    Conflict:
+      type: object
+      properties:
+        conflict_id: { type: string }
+        view_id:     { type: string }
+        path:        { type: string }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              stack_id:  { type: string }
+              change_id: { type: string }
+              blob_hash: { type: string, nullable: true }
+        resolution:
+          nullable: true
+          description: null if unresolved
+
+    HubBundle:
+      type: object
+      required: [project_id, stacks, changes, blobs]
+      properties:
+        project_id:
+          type: string
+          example: frontend
+        stacks:
+          type: array
+          items:
+            type: object
+            properties:
+              stack_id:       { type: string }
+              agent_id:       { type: string }
+              base_change_id: { type: string, nullable: true }
+              tip_change_id:  { type: string, nullable: true }
+              status:         { type: string }
+        changes:
+          type: array
+          items:
+            type: object
+            properties:
+              change_id:  { type: string }
+              parent_id:  { type: string, nullable: true }
+              path:       { type: string }
+              op:         { type: string }
+              diff_hash:  { type: string, nullable: true }
+              agent_id:   { type: string }
+              reason:     { type: string }
+              task_ref:   { type: string, nullable: true }
+              created_at: { type: integer }
+        files:
+          type: array
+          description: Per-change file-state rows used to reconstruct snapshots.
+          items:
+            type: object
+            properties:
+              change_id: { type: string }
+              path:      { type: string }
+              blob_hash: { type: string, nullable: true }
+        edits:
+          type: array
+          description: Structured edit metadata for compact agent review and conflict reasoning.
+          items:
+            $ref: '#/components/schemas/EditMetadata'
+        blobs:
+          type: object
+          additionalProperties:
+            type: string
+            description: base64-encoded blob content
+          description: "Map of blob_hash → base64 content"
