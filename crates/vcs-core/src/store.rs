@@ -12,6 +12,9 @@ use crate::change::{
 use crate::error::{Result, VcsError};
 use crate::hub::{HubBundle, HubChange, HubEditMetadata, HubFileEntry, HubStack};
 use crate::intent::Intent;
+use crate::session::{
+    AgentOverview, ContentionEntry, FileContention, Session, SessionSummary,
+};
 use crate::stack::{Stack, StackStatus};
 use crate::view::{state_hash, Candidate, Conflict, Resolution, View};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1458,4 +1461,210 @@ fn decode_b64(input: &str) -> Result<Vec<u8>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     B64.decode(input)
         .map_err(|e| VcsError::Other(format!("patch base64: {e}")))
+}
+
+// ── Session tracking ───────────────────────────────────────────────────────
+
+impl Store {
+    /// Register a new agent session. Call at the start of every Claude Code chat.
+    /// Returns the `session_id` — pass it to `session_close` when done.
+    pub fn session_open(&self, agent_id: &str) -> Result<String> {
+        let session_id = new_id();
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO sessions (session_id, agent_id, stack_id, started_at, last_seen_at, status)
+             VALUES (?1, ?2, NULL, ?3, ?3, 'active')",
+            params![session_id, agent_id, now],
+        )?;
+        tracing::debug!(%session_id, %agent_id, "session opened");
+        Ok(session_id)
+    }
+
+    /// Link a stack to a session after `open_stack` is called.
+    pub fn session_link_stack(&self, session_id: &str, stack_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET stack_id=?1, last_seen_at=?2 WHERE session_id=?3",
+            params![stack_id, now_ms(), session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Heartbeat — update last_seen_at to prove the session is still alive.
+    pub fn session_heartbeat(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET last_seen_at=?1 WHERE session_id=?2",
+            params![now_ms(), session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark session as done. The associated stack may still be open for merging.
+    pub fn session_close(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET status='done', last_seen_at=?1 WHERE session_id=?2",
+            params![now_ms(), session_id],
+        )?;
+        tracing::debug!(%session_id, "session closed");
+        Ok(())
+    }
+
+    /// List all sessions, newest first.
+    pub fn list_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, agent_id, stack_id, started_at, last_seen_at, status
+             FROM sessions ORDER BY started_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Session {
+                session_id:   r.get(0)?,
+                agent_id:     r.get(1)?,
+                stack_id:     r.get(2)?,
+                started_at:   r.get(3)?,
+                last_seen_at: r.get(4)?,
+                status:       r.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Check which OTHER open stacks have also touched `path`.
+    /// Returns an empty vec if no contention — call after every `edit`.
+    pub fn file_contention(&self, path: &str, caller_stack_id: &str) -> Result<FileContention> {
+        // Find all open stacks (except caller) that have files_at_change for this path
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT s.stack_id, s.agent_id, fac.change_id
+             FROM stacks s
+             JOIN files_at_change fac ON fac.change_id = s.tip_change_id
+             WHERE s.status = 'open'
+               AND s.stack_id != ?1
+               AND fac.path = ?2
+               AND fac.blob_hash IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![caller_stack_id, path], |r| {
+            Ok(ContentionEntry {
+                stack_id:  r.get(0)?,
+                agent_id:  r.get(1)?,
+                change_id: r.get(2)?,
+            })
+        })?;
+        let other_stacks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(FileContention {
+            path: path.to_owned(),
+            other_stacks,
+        })
+    }
+
+    /// Build a full multi-agent overview — the primary tool for Claude to narrate
+    /// what every agent is doing without a human opening a browser.
+    pub fn overview(&self) -> Result<AgentOverview> {
+        let now = now_ms();
+
+        // All sessions active in the last 24 h
+        let sessions_raw = self.list_sessions()?;
+        let open_stacks = self.list_stacks()?.into_iter()
+            .filter(|s| s.status == crate::stack::StackStatus::Open)
+            .collect::<Vec<_>>();
+
+        // Build per-session summaries
+        let mut summaries: Vec<SessionSummary> = Vec::new();
+        for sess in &sessions_raw {
+            let files_touched;
+            let changes_count;
+            if let Some(ref sid) = sess.stack_id {
+                let snap = self.stack_snapshot(sid).unwrap_or_default();
+                files_touched = snap.keys().cloned().collect::<Vec<_>>();
+                let log = self.log(sid).unwrap_or_default();
+                changes_count = log.len();
+            } else {
+                files_touched = vec![];
+                changes_count = 0;
+            }
+            summaries.push(SessionSummary {
+                session_id:    sess.session_id.clone(),
+                agent_id:      sess.agent_id.clone(),
+                stack_id:      sess.stack_id.clone(),
+                status:        sess.status.clone(),
+                files_touched,
+                changes_count,
+                started_at:    sess.started_at,
+                last_seen_at:  sess.last_seen_at,
+            });
+        }
+
+        // Find hot files: paths touched by 2+ open stacks
+        let mut path_to_agents: HashMap<String, Vec<String>> = HashMap::new();
+        for stk in &open_stacks {
+            let snap = self.stack_snapshot(&stk.stack_id).unwrap_or_default();
+            for (path, blob) in &snap {
+                if blob.is_some() {
+                    path_to_agents
+                        .entry(path.clone())
+                        .or_default()
+                        .push(stk.agent_id.clone());
+                }
+            }
+        }
+        let mut hot_files: Vec<crate::session::HotFile> = path_to_agents
+            .into_iter()
+            .filter(|(_, agents)| agents.len() > 1)
+            .map(|(path, touched_by)| crate::session::HotFile {
+                will_conflict: true, // same file, different stacks → conflict
+                path,
+                touched_by,
+            })
+            .collect();
+        hot_files.sort_by(|a, b| a.path.cmp(&b.path));
+
+        // Build human-readable summary
+        let active_count = sessions_raw.iter().filter(|s| s.status == "active").count();
+        let summary = build_overview_summary(active_count, &open_stacks, &hot_files);
+
+        Ok(AgentOverview {
+            sessions: summaries,
+            hot_files,
+            active_count,
+            summary,
+            generated_at: now,
+        })
+    }
+}
+
+fn build_overview_summary(
+    active_count: usize,
+    open_stacks: &[crate::stack::Stack],
+    hot_files: &[crate::session::HotFile],
+) -> String {
+    if active_count == 0 && open_stacks.is_empty() {
+        return "No active sessions. Store is idle.".into();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!(
+        "{active_count} active session(s), {} open stack(s).",
+        open_stacks.len()
+    ));
+
+    for stk in open_stacks {
+        lines.push(format!(
+            "  • {} (stack {}…)",
+            stk.agent_id,
+            &stk.stack_id[..8.min(stk.stack_id.len())]
+        ));
+    }
+
+    if hot_files.is_empty() {
+        lines.push("  No file conflicts between open stacks.".into());
+    } else {
+        lines.push(format!("  ⚡ {} file(s) will conflict when merged:", hot_files.len()));
+        for hf in hot_files {
+            lines.push(format!(
+                "    - {} → touched by: {}",
+                hf.path,
+                hf.touched_by.join(", ")
+            ));
+        }
+    }
+
+    lines.join("\n")
 }

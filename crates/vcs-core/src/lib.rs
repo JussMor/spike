@@ -26,6 +26,7 @@ pub mod change;
 pub mod error;
 pub mod hub;
 pub mod intent;
+pub mod session;
 pub mod stack;
 pub mod store;
 pub mod view;
@@ -38,6 +39,7 @@ pub use change::{
 pub use error::{Result, VcsError};
 pub use hub::{HubBundle, HubChange, HubEditMetadata, HubFileEntry, HubStack};
 pub use intent::Intent;
+pub use session::{AgentOverview, ContentionEntry, FileContention, Session, SessionSummary};
 pub use stack::{Stack, StackStatus};
 pub use store::{DiffEntry, Store};
 pub use view::{Candidate, Conflict, Resolution, View};

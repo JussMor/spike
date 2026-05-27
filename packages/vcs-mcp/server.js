@@ -353,6 +353,69 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'vcs_session_open',
+    description:
+      'Register this Claude Code session with the vcs store. ' +
+      'Call ONCE at the start of every chat session, before vcs_stack_open. ' +
+      'Returns a session_id — pass it to vcs_session_close when done. ' +
+      'Sessions let vcs_overview show every agent working in this project simultaneously.',
+    inputSchema: {
+      type: 'object',
+      required: ['agent_id'],
+      properties: {
+        agent_id: {
+          type: 'string',
+          description: 'Unique ID for this agent session, e.g. "claude-code-feature-auth".',
+        },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_session_close',
+    description: 'Mark this session as done. Call when the task is complete.',
+    inputSchema: {
+      type: 'object',
+      required: ['session_id'],
+      properties: {
+        session_id: { type: 'string' },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_touching',
+    description:
+      'Check which other open stacks are currently editing a given file. ' +
+      'Call after vcs_edit to get immediate collision warnings — no view needed. ' +
+      'Returns other_stacks: [] if you are the only one touching this file.',
+    inputSchema: {
+      type: 'object',
+      required: ['path'],
+      properties: {
+        path:      { type: 'string', description: 'File path to check.' },
+        stack_id:  { type: 'string', description: 'Your stack (excluded from results).' },
+        store_path: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'vcs_overview',
+    description:
+      'Return a complete picture of all agent activity in this project RIGHT NOW: ' +
+      'active sessions, what files each agent is touching, and which files will ' +
+      'conflict when stacks are merged. ' +
+      'This is the primary tool for narrating multi-agent state to the human — ' +
+      'no browser required. Call this whenever the user asks "what is happening" ' +
+      'or "what are the agents doing".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
 ]
 
 // ── Tool handlers ──────────────────────────────────────────────────────────
@@ -404,7 +467,14 @@ function handleTool(name, args) {
     case 'vcs_stack_open': {
       const a = ['stack', 'open', '--agent', args.agent_id, ...store]
       if (args.base_change_id) a.push('--base', args.base_change_id)
-      return runVcs(a)
+      const result = runVcs(a)
+      // Auto-link the new stack to the session if one was registered
+      if (args.session_id && result?.stack_id) {
+        try {
+          runVcs([...store, 'session', 'link-stack', args.session_id, result.stack_id])
+        } catch (_) { /* non-fatal */ }
+      }
+      return result
     }
 
     case 'vcs_stack_close':
@@ -489,6 +559,21 @@ function handleTool(name, args) {
 
     case 'vcs_pull':
       return runVcs([...store, 'pull', args.remote])
+
+    case 'vcs_session_open':
+      return runVcs([...store, 'session', 'open', '--agent', args.agent_id])
+
+    case 'vcs_session_close':
+      return runVcs([...store, 'session', 'close', args.session_id])
+
+    case 'vcs_touching': {
+      const a = [...store, 'touching', args.path]
+      if (args.stack_id) a.push('--stack', args.stack_id)
+      return runVcs(a)
+    }
+
+    case 'vcs_overview':
+      return runVcs([...store, 'overview'])
 
     default:
       throw new Error(`Unknown tool: ${name}`)
