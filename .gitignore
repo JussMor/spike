@@ -3,7 +3,12 @@ examples/node-demo/node_modules/
 examples/tanstack-vite/node_modules/
 **/*.tmp
 .vcs-spike/
-# Don't ignore .vcs/ — it's like .git/, tracked intentionally
+
+# ── vcs runtime data ──────────────────────────────────────────────────────
+# .vcs/ is the agent's local store (like .git/).  It is NOT committed to git.
+# Each machine/agent maintains its own local store.
+# To share state between machines use: vcs push/pull <hub-url>
+.vcs/
 
 # calculator demo — live example, not committed
 examples/calculator/

@@ -456,7 +456,7 @@ See `docs/cicd-architecture.md` for the full GitHub Actions workflow.
 | OpenAPI 3.1 spec for hub API | ✅ built |
 | Remote push/pull between stores | ✅ built |
 | History navigation / filesystem materializer (`vcs checkout`) | ✅ built |
-| Filesystem watcher (human dev UX) | 🔜 post-spike |
-| Conflict resolution UI | 🔜 post-spike |
-| ACL / secrets / auth on hub | 🔜 post-spike |
-| Binary releases (GitHub Releases) | 🔜 post-spike |
+| `vcs watch` — filesystem watcher (human dev UX) | ✅ built |
+| Conflict resolution UI (interactive Pick A/B + custom merge) | ✅ built |
+| Multi-token ACL (`vcs token add/ls/remove`) | ✅ built |
+| Binary releases (GitHub Actions release workflow) | ✅ built |

@@ -217,3 +217,65 @@ fn gc_keeps_blobs_from_live_stack() {
     let snap = store.snapshot_at(&tip).unwrap();
     assert!(snap.contains_key("src/live.ts"), "live blob must not be GC'd");
 }
+
+// ── P2: content-aware file_contention ─────────────────────────────────────
+
+#[test]
+fn contention_same_content_is_not_reported() {
+    let (store, _dir) = store();
+    let sa = store.open_stack("agent-a", None).unwrap();
+    let sb = store.open_stack("agent-b", None).unwrap();
+
+    // Both write identical content — should NOT appear in contention
+    store.edit(&sa, "src/shared.ts", b"same content", Intent::new("a")).unwrap();
+    store.edit(&sb, "src/shared.ts", b"same content", Intent::new("b")).unwrap();
+
+    let ct = store.file_contention("src/shared.ts", &sa).unwrap();
+    assert!(ct.other_stacks.is_empty(),
+        "same-content writes must not produce contention: {:?}", ct.other_stacks);
+}
+
+#[test]
+fn contention_different_content_is_reported() {
+    let (store, _dir) = store();
+    let sa = store.open_stack("agent-a", None).unwrap();
+    let sb = store.open_stack("agent-b", None).unwrap();
+
+    store.edit(&sa, "src/calc.ts", b"version A", Intent::new("a")).unwrap();
+    store.edit(&sb, "src/calc.ts", b"version B", Intent::new("b")).unwrap();
+
+    let ct = store.file_contention("src/calc.ts", &sa).unwrap();
+    assert_eq!(ct.other_stacks.len(), 1, "different content must appear in contention");
+    assert_eq!(ct.other_stacks[0].agent_id, "agent-b");
+    // blob_hash must be populated so callers can compare without extra lookups
+    assert!(ct.other_stacks[0].blob_hash.is_some());
+}
+
+#[test]
+fn contention_only_other_stack_not_caller() {
+    let (store, _dir) = store();
+    let sa = store.open_stack("agent-a", None).unwrap();
+
+    store.edit(&sa, "src/a.ts", b"content", Intent::new("a")).unwrap();
+
+    // Caller is excluded — should never see itself
+    let ct = store.file_contention("src/a.ts", &sa).unwrap();
+    assert!(ct.other_stacks.is_empty(), "caller's own stack must not appear in contention");
+}
+
+#[test]
+fn contention_closed_stack_not_reported() {
+    let (store, _dir) = store();
+    let sa = store.open_stack("agent-a", None).unwrap();
+    let sb = store.open_stack("agent-b", None).unwrap();
+
+    store.edit(&sa, "src/x.ts", b"version A", Intent::new("a")).unwrap();
+    store.edit(&sb, "src/x.ts", b"version B", Intent::new("b")).unwrap();
+    // Close stack B — done with its work
+    store.close_stack(&sb).unwrap();
+
+    // A is still open; B is closed → no live contention
+    let ct = store.file_contention("src/x.ts", &sa).unwrap();
+    assert!(ct.other_stacks.is_empty(),
+        "closed stack must not appear in live contention: {:?}", ct.other_stacks);
+}

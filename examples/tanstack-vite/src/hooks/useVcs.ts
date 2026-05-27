@@ -5,12 +5,25 @@
  * that exposes /api/vcs/* endpoints backed by the real .vcs/ store.
  */
 
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 const API = '/api/vcs'
 
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API}${path}`)
+  if (!res.ok) {
+    const { error } = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(error)
+  }
+  return res.json()
+}
+
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
   if (!res.ok) {
     const { error } = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(error)
@@ -54,6 +67,12 @@ export interface Conflict {
   candidates: Candidate[]
   resolution: unknown | null
 }
+
+// ── Resolution types ──────────────────────────────────────────────────────
+
+export type Resolution =
+  | { type: 'pick'; stack_id: string }
+  | { type: 'merge'; content: string }
 
 // ── Hooks ─────────────────────────────────────────────────────────────────
 
@@ -105,5 +124,43 @@ export function useActiveView() {
     queryKey: ['vcs', 'active-view'],
     queryFn: () => apiFetch('/active-view'),
     refetchInterval: 3000,
+  })
+}
+
+/**
+ * Mutation hook for resolving a conflict.
+ *
+ * Usage:
+ *   const resolve = useResolveConflict()
+ *   resolve.mutate({ conflictId: 'abc', resolution: { type: 'pick', stack_id: 'xyz' } })
+ *   resolve.mutate({ conflictId: 'abc', resolution: { type: 'merge', content: '…merged…' } })
+ *
+ * On success, all conflict queries are invalidated so the UI refreshes.
+ */
+export function useResolveConflict() {
+  const qc = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      conflictId,
+      resolution,
+    }: {
+      conflictId: string
+      resolution: Resolution
+    }) => {
+      if (resolution.type === 'pick') {
+        return apiPost(`/conflicts/${conflictId}/resolve`, { pick: resolution.stack_id })
+      }
+      // Custom merge — encode as base64
+      const encoder = new TextEncoder()
+      const bytes = encoder.encode(resolution.content)
+      const b64 = btoa(String.fromCharCode(...bytes))
+      return apiPost(`/conflicts/${conflictId}/resolve`, { merge_content_b64: b64 })
+    },
+    onSuccess: () => {
+      // Refresh conflict list and active view
+      qc.invalidateQueries({ queryKey: ['vcs', 'conflicts'] })
+      qc.invalidateQueries({ queryKey: ['vcs', 'active-view'] })
+    },
   })
 }

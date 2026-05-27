@@ -1,0 +1,194 @@
+name: Release
+
+# Triggered when a semver tag is pushed: v1.0.0, v0.3.1-beta, etc.
+# Creates a GitHub release and uploads pre-built binaries for all platforms.
+#
+# Usage:
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# Artefacts produced:
+#   vcs-v1.2.3-linux-x86_64.tar.gz
+#   vcs-v1.2.3-linux-aarch64.tar.gz
+#   vcs-v1.2.3-macos-x86_64.tar.gz
+#   vcs-v1.2.3-macos-aarch64.tar.gz
+#   vcs-v1.2.3-windows-x86_64.zip
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: write   # needed to create GitHub releases and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build matrix ─────────────────────────────────────────────────────────
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64  (musl = static binary, no glibc dependency)
+          - os:       ubuntu-latest
+            target:   x86_64-unknown-linux-musl
+            archive:  tar.gz
+            platform: linux-x86_64
+
+          # Linux ARM64 (cross-compiled on ubuntu)
+          - os:       ubuntu-latest
+            target:   aarch64-unknown-linux-musl
+            archive:  tar.gz
+            platform: linux-aarch64
+            cross:    true
+
+          # macOS Intel
+          - os:       macos-13
+            target:   x86_64-apple-darwin
+            archive:  tar.gz
+            platform: macos-x86_64
+
+          # macOS Apple Silicon
+          - os:       macos-latest
+            target:   aarch64-apple-darwin
+            archive:  tar.gz
+            platform: macos-aarch64
+
+          # Windows x86_64
+          - os:       windows-latest
+            target:   x86_64-pc-windows-msvc
+            archive:  zip
+            platform: windows-x86_64
+            ext:      .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Cross-compilation toolchain for Linux aarch64
+      - name: Install cross (ARM64 builds)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # musl target for static Linux binaries
+      - name: Install musl tools (x86_64 Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      # ── Compile ────────────────────────────────────────────────────────
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} -p vcs-cli
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build --release --target ${{ matrix.target }} -p vcs-cli
+
+      # ── Package ────────────────────────────────────────────────────────
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          VERSION="${{ github.ref_name }}"
+          BIN="target/${{ matrix.target }}/release/vcs${{ matrix.ext || '' }}"
+          ARCHIVE="vcs-${VERSION}-${{ matrix.platform }}.tar.gz"
+          strip "${BIN}" 2>/dev/null || true
+          tar -czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" "vcs${{ matrix.ext || '' }}"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Package (zip — Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ github.ref_name }}"
+          $BIN = "target\${{ matrix.target }}\release\vcs${{ matrix.ext }}"
+          $ARCHIVE = "vcs-${VERSION}-${{ matrix.platform }}.zip"
+          Compress-Archive -Path $BIN -DestinationPath $ARCHIVE
+          "ARCHIVE=$ARCHIVE" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload build artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  # ── Create GitHub release ─────────────────────────────────────────────────
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Compute checksums
+        run: |
+          cd dist
+          find . -name '*.tar.gz' -o -name '*.zip' | sort | while read f; do
+            sha256sum "$f"
+          done | tee ../SHA256SUMS.txt
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ github.ref_name }}"
+          cat > release_notes.md <<EOF
+          ## vcs-spike ${VERSION}
+
+          ### Installation
+
+          **Linux / macOS (one command):**
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/JussMor/spike/main/install.sh | sh
+          \`\`\`
+
+          **Direct download:**
+
+          | Platform | Download |
+          |----------|----------|
+          | Linux x86_64 (static) | \`vcs-${VERSION}-linux-x86_64.tar.gz\` |
+          | Linux ARM64 (static)  | \`vcs-${VERSION}-linux-aarch64.tar.gz\` |
+          | macOS Intel           | \`vcs-${VERSION}-macos-x86_64.tar.gz\` |
+          | macOS Apple Silicon   | \`vcs-${VERSION}-macos-aarch64.tar.gz\` |
+          | Windows x86_64        | \`vcs-${VERSION}-windows-x86_64.zip\` |
+
+          ### What's in this release
+
+          See [CLAUDE.md](https://github.com/JussMor/spike/blob/main/CLAUDE.md) for the full feature list.
+
+          ### Checksums
+
+          \`\`\`
+          $(cat SHA256SUMS.txt)
+          \`\`\`
+          EOF
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.zip
+            SHA256SUMS.txt

@@ -91,10 +91,25 @@ pub struct AgentOverview {
 
 /// Per-file contention info returned alongside a `vcs_edit` call.
 /// Non-blocking — just tells the agent if another session is on the same file.
+///
+/// ## Collision semantics
+///
+/// A **real collision** requires ALL THREE:
+///   1. Another *open* stack touches the same path
+///   2. That stack's blob hash is **different** from the caller's
+///   3. You are about to merge both stacks into one view
+///
+/// `file_contention` only surfaces condition (1) + (2).
+/// Condition (3) is only evaluated at `view open` + `view conflicts` time.
+///
+/// If `other_stacks` is non-empty the agents have diverged on this file.
+/// If `other_stacks` is empty — either nobody else touched it, or they all
+/// wrote identical content (no real conflict possible on merge).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileContention {
     pub path:         String,
-    /// Other open stacks (not the caller's) that have this file.
+    /// Other open stacks whose content for this file DIFFERS from the caller's.
+    /// Empty = safe (no divergence detected — merge will be clean).
     pub other_stacks: Vec<ContentionEntry>,
 }
 
@@ -103,4 +118,7 @@ pub struct ContentionEntry {
     pub stack_id:  String,
     pub agent_id:  String,
     pub change_id: String,
+    /// The blob hash this other stack has for the file.
+    /// Compare against your own blob hash — if equal, no real conflict.
+    pub blob_hash: Option<String>,
 }
