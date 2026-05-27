@@ -247,6 +247,104 @@ export const vcsTools = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_rename',
+      description: 'Record a file rename/move in vcs.',
+      parameters: {
+        type: 'object',
+        required: ['stack_id', 'from', 'to', 'content', 'reason'],
+        properties: {
+          stack_id: { type: 'string' },
+          from:     { type: 'string', description: 'Old path.' },
+          to:       { type: 'string', description: 'New path.' },
+          content:  { type: 'string', description: 'File content at the new path.' },
+          reason:   { type: 'string' },
+          task_ref: { type: 'string' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_history',
+      description: 'Show complete change history across all stacks (newest first).',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_checkout',
+      description:
+        'Materialise the tracked file tree at a historical change ID into a directory. ' +
+        'Use this to replay or inspect what an agent produced at any point in history.',
+      parameters: {
+        type: 'object',
+        required: ['change_id'],
+        properties: {
+          change_id: { type: 'string', description: 'Change ID to materialise (from vcs_log or vcs_history).' },
+          worktree: {
+            type: 'string',
+            description: 'Directory to write files into. Defaults to current directory.',
+          },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_remote_add',
+      description: 'Add or update a named remote hub URL for push/pull operations.',
+      parameters: {
+        type: 'object',
+        required: ['name', 'url'],
+        properties: {
+          name: { type: 'string', description: 'Remote name (e.g. "hub", "staging").' },
+          url:  { type: 'string', description: 'Hub URL (e.g. "http://localhost:7474").' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_push',
+      description:
+        'Push this store\'s stacks, changes, and blobs to a remote hub. ' +
+        'Use after all agents finish to share agent history cross-project.',
+      parameters: {
+        type: 'object',
+        required: ['remote'],
+        properties: {
+          remote:     { type: 'string', description: 'Named remote or direct http(s) URL.' },
+          project_id: { type: 'string', description: 'Project ID to tag the bundle with.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_pull',
+      description:
+        'Pull stacks, changes, and blobs from a remote hub into the local store. ' +
+        'Idempotent — re-pulling the same bundle is a no-op.',
+      parameters: {
+        type: 'object',
+        required: ['remote'],
+        properties: {
+          remote: { type: 'string', description: 'Named remote or direct http(s) URL.' },
+        },
+      },
+    },
+  },
 ]
 
 // ── System prompt for OpenAI agents ──────────────────────────────────────
@@ -363,6 +461,30 @@ export async function handleVcsTool(name, args = {}) {
     }
     case 'vcs_log':
       return { changes: run(['log', args.stack_id]) ?? [] }
+    case 'vcs_rename': {
+      const t = tmp(args.content); try {
+        const a = ['rename', args.stack_id, args.from, args.to,
+          '--content-file', t, '--reason', args.reason]
+        if (args.task_ref) a.push('--task-ref', args.task_ref)
+        return run(a)
+      } finally { rmSync(t, { force: true }) }
+    }
+    case 'vcs_history':
+      return { changes: run(['history']) ?? [] }
+    case 'vcs_checkout': {
+      const a = ['checkout', args.change_id]
+      if (args.worktree) a.push('--worktree', args.worktree)
+      return run(a)
+    }
+    case 'vcs_remote_add':
+      return run(['remote', 'add', args.name, args.url])
+    case 'vcs_push': {
+      const a = ['push', args.remote]
+      if (args.project_id) a.push('--project-id', args.project_id)
+      return run(a)
+    }
+    case 'vcs_pull':
+      return run(['pull', args.remote])
     default:
       throw new Error(`Unknown vcs tool: ${name}`)
   }
