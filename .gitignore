@@ -1,6 +1,7 @@
 /target/
 examples/node-demo/node_modules/
 examples/tanstack-vite/node_modules/
+packages/vcs-mcp/node_modules/
 **/*.tmp
 .vcs-spike/
 
