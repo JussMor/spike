@@ -1,0 +1,18 @@
+[package]
+name    = "vcs-cli"
+version = "0.1.0"
+edition = "2021"
+description = "vcs — agent-native VCS command-line interface"
+
+[[bin]]
+name = "vcs"
+path = "src/main.rs"
+
+[dependencies]
+vcs-core = { path = "../vcs-core" }
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+clap       = { workspace = true }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }

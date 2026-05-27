@@ -1,0 +1,4 @@
+/target/
+node-demo/node_modules/
+**/*.tmp
+.vcs-spike/
