@@ -7,12 +7,13 @@
 use crate::blob::BlobStore;
 use crate::change::{compute_change_id, Change, ChangeId, ConflictId, Op, StackId, ViewId};
 use crate::error::{Result, VcsError};
+use crate::hub::HubBundle;
 use crate::intent::Intent;
 use crate::stack::{Stack, StackStatus};
 use crate::view::{state_hash, Candidate, Conflict, Resolution, View};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -20,6 +21,7 @@ const SCHEMA: &str = include_str!("schema.sql");
 pub struct Store {
     conn:  Connection,
     blobs: BlobStore,
+    root:  PathBuf,
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -45,7 +47,7 @@ impl Store {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(SCHEMA)?;
         let blobs = BlobStore::new(path)?;
-        Ok(Self { conn, blobs })
+        Ok(Self { conn, blobs, root: path.to_path_buf() })
     }
 
     /// Open an existing store at `path`.
@@ -57,7 +59,7 @@ impl Store {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         let blobs = BlobStore::new(path)?;
-        Ok(Self { conn, blobs })
+        Ok(Self { conn, blobs, root: path.to_path_buf() })
     }
 
     /// Open if exists, init if not.
@@ -540,6 +542,169 @@ impl Store {
     /// Fetch raw bytes by hash.
     pub fn get_blob(&self, hash: &str) -> Result<Vec<u8>> {
         self.blobs.get(hash)
+    }
+
+    // ── Listing helpers (used by serve + remote clients) ───────────────────
+
+    /// All stacks, newest first.
+    pub fn list_stacks(&self) -> Result<Vec<Stack>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT stack_id, agent_id, base_change_id, tip_change_id, status
+             FROM stacks ORDER BY rowid DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (sid, aid, base, tip, status_s) = row?;
+            out.push(Stack {
+                stack_id:      sid,
+                agent_id:      aid,
+                base_change_id: base,
+                tip_change_id:  tip,
+                status:        status_s.parse().unwrap_or(StackStatus::Open),
+            });
+        }
+        Ok(out)
+    }
+
+    /// All changes, newest first.
+    pub fn list_changes(&self) -> Result<Vec<Change>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT change_id, parent_id, path, op, diff_hash, agent_id, intent, created_at
+             FROM changes ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (cid, pid, path, op_s, dh, aid, intent_s, ts) = row?;
+            out.push(Change {
+                change_id:  cid,
+                parent_id:  pid,
+                path,
+                op:         op_s.parse()?,
+                diff_hash:  dh,
+                agent_id:   aid,
+                intent:     Intent::from_json(&intent_s)?,
+                created_at: ts,
+            });
+        }
+        Ok(out)
+    }
+
+    /// All views, newest first.
+    pub fn list_views(&self) -> Result<Vec<View>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT view_id, base_change_id, applied_stacks, state_hash
+             FROM views ORDER BY rowid DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(View {
+                view_id:        row.get(0)?,
+                base_change_id: row.get(1)?,
+                applied_stacks: row.get(2)?,
+                state_hash:     row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows { out.push(row?); }
+        Ok(out)
+    }
+
+    /// Most-recently opened view (for /active-view compatibility with Vite plugin).
+    pub fn latest_view(&self) -> Result<Option<View>> {
+        self.conn
+            .query_row(
+                "SELECT view_id, base_change_id, applied_stacks, state_hash
+                 FROM views ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(View {
+                        view_id:        row.get(0)?,
+                        base_change_id: row.get(1)?,
+                        applied_stacks: row.get(2)?,
+                        state_hash:     row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Expose the path where the store lives (for status endpoint).
+    pub fn store_path(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Ingest a [`HubBundle`] from a remote project.
+    ///
+    /// Idempotent — uses `INSERT OR IGNORE` so re-pushing the same bundle
+    /// is a no-op (content-addressed blobs and deterministic change IDs).
+    pub fn import_bundle(&self, bundle: &HubBundle) -> Result<(usize, usize, usize)> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        // 1. Blobs
+        let mut blob_count = 0usize;
+        for (hash, b64) in &bundle.blobs {
+            let data = B64.decode(b64)
+                .map_err(|e| VcsError::Other(format!("blob {hash} base64: {e}")))?;
+            let actual = self.blobs.put(&data)?;
+            if actual != *hash {
+                return Err(VcsError::Other(format!(
+                    "blob hash mismatch: sent {hash}, stored {actual}"
+                )));
+            }
+            blob_count += 1;
+        }
+
+        // 2. Stacks (OR IGNORE — already present stacks are skipped)
+        for s in &bundle.stacks {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO stacks
+                 (stack_id, agent_id, base_change_id, tip_change_id, status)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![s.stack_id, s.agent_id, s.base_change_id,
+                        s.tip_change_id, s.status],
+            )?;
+        }
+
+        // 3. Changes (OR IGNORE)
+        for c in &bundle.changes {
+            let intent_json = serde_json::json!({
+                "reason":   c.reason,
+                "task_ref": c.task_ref,
+            })
+            .to_string();
+            self.conn.execute(
+                "INSERT OR IGNORE INTO changes
+                 (change_id, parent_id, path, op, diff_hash, agent_id, intent, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    c.change_id, c.parent_id, c.path, c.op,
+                    c.diff_hash, c.agent_id, intent_json, c.created_at
+                ],
+            )?;
+        }
+
+        Ok((blob_count, bundle.stacks.len(), bundle.changes.len()))
     }
 }
 

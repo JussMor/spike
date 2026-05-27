@@ -1,0 +1,18 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "vcs-spike",
+  "name_for_model": "vcs",
+  "description_for_human": "Agent-native version control. Track parallel agent changes, surface conflicts before they hit disk.",
+  "description_for_model": "vcs-spike gives you structured change tracking for multi-agent coding workflows. Use vcs_stack_open at the start of every task, vcs_edit for every file you modify, and vcs_stack_close when done. If you detect conflicts via vcs_view_conflicts, report them — never resolve silently. The hub server (vcs serve) connects changes from separate projects so cross-project conflicts surface before deployment.",
+  "auth": {
+    "type": "none"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "http://localhost:7474/openapi.yaml",
+    "is_user_authenticated": false
+  },
+  "logo_url": "http://localhost:7474/logo.png",
+  "contact_email": "jussmor@outlook.es",
+  "legal_info_url": "https://github.com/JussMor/spike"
+}

@@ -21,13 +21,13 @@ export function ChangeLog() {
   )
 
   return (
-    <ul className="change-list">
+    <ul className="change-list" data-testid="change-log">
       {[...changes].reverse().map(c => (
-        <li key={c.change_id} className="change-item">
-          <span className={opClass(c.op)}>{c.op}</span>
-          <span className="change-path">{c.path}</span>
-          <span className="change-reason">{c.intent.reason}</span>
-          <span className="change-meta">
+        <li key={c.change_id} className="change-item" data-testid="change-item">
+          <span className={opClass(c.op)} data-testid="change-op">{c.op}</span>
+          <span className="change-path"  data-testid="change-path">{c.path}</span>
+          <span className="change-reason" data-testid="change-reason">{c.intent.reason}</span>
+          <span className="change-meta"  data-testid="change-meta">
             {c.change_id.slice(0, 10)} · {c.agent_id} · {formatTs(c.created_at)}
             {c.intent.task_ref ? ` · task:${c.intent.task_ref}` : ''}
           </span>

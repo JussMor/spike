@@ -67,7 +67,7 @@ export function vcsPlugin() {
   return {
     name: 'vcs-api',
     configureServer(server) {
-      server.middlewares.use('/api/vcs', (req, res, next) => {
+      server.middlewares.use('/api/vcs', async (req, res, next) => {
         const url = new URL(req.url, 'http://localhost')
         const path = url.pathname
 

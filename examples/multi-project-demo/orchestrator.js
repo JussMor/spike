@@ -1,0 +1,298 @@
+/**
+ * multi-project-demo/orchestrator.js
+ *
+ * Demonstrates how two separate projects (frontend + backend) can push their
+ * agent changes to a shared vcs hub and detect cross-project conflicts.
+ *
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │  Problem without vcs:                                               │
+ * │                                                                     │
+ * │  agent-api   writes:  POST /auth/login  (backend)                  │
+ * │  agent-ui    writes:  fetch('/auth/signin', ...)  (frontend)        │
+ * │                                                                     │
+ * │  Neither agent sees the other. The endpoint mismatch only appears   │
+ * │  at runtime when the e2e tests fail.                                │
+ * │                                                                     │
+ * │  With vcs hub:                                                      │
+ * │                                                                     │
+ * │  Both agents push to the hub → hub detects conflict on              │
+ * │  shared/api-contract.md before anything is deployed.               │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ * Run:  VCS_BIN=../../target/release/vcs node orchestrator.js
+ */
+
+import { spawnSync } from 'node:child_process'
+import { rmSync, writeFileSync, existsSync } from 'node:fs'
+import { join, resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dir = dirname(fileURLToPath(import.meta.url))
+
+// ── Binary resolution ──────────────────────────────────────────────────────
+
+const BIN = process.env.VCS_BIN ??
+  resolve(__dir, '../../target/release/vcs')
+
+if (!existsSync(BIN)) {
+  console.error(`vcs binary not found at ${BIN}`)
+  console.error('Build it first: cargo build --release')
+  console.error('Then: VCS_BIN=../../target/release/vcs node orchestrator.js')
+  process.exit(1)
+}
+
+// ── Store paths ────────────────────────────────────────────────────────────
+// Each project has its own local store.  The hub is a third store.
+
+const HUB_STORE      = join(__dir, '.vcs-hub')
+const FRONTEND_STORE = join(__dir, '.vcs-frontend')
+const BACKEND_STORE  = join(__dir, '.vcs-backend')
+
+// ── Helper: run vcs CLI against a specific store ──────────────────────────
+
+function vcs(storePath, ...args) {
+  const r = spawnSync(BIN, ['--json', '--store', storePath, ...args], {
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  if (r.status !== 0) {
+    throw new Error(`vcs ${args[0]} failed:\n${r.stderr}`)
+  }
+  const out = r.stdout.trim()
+  if (!out) return null
+  try { return JSON.parse(out) } catch { return out }
+}
+
+function vcsHuman(storePath, ...args) {
+  const r = spawnSync(BIN, ['--store', storePath, ...args], {
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  return r.stdout + r.stderr
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function tmpFile(content) {
+  const p = join(__dir, `.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  writeFileSync(p, content, 'utf8')
+  return p
+}
+
+function cleanup(paths) {
+  for (const p of paths) {
+    if (existsSync(p)) rmSync(p, { force: true })
+  }
+}
+
+function section(title) {
+  console.log()
+  console.log('─'.repeat(60))
+  console.log(`  ${title}`)
+  console.log('─'.repeat(60))
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Main demo
+// ═══════════════════════════════════════════════════════════════════════════
+
+const tmpFiles = []
+
+try {
+  section('Setup — init three isolated stores')
+
+  // Clean previous run
+  rmSync(HUB_STORE,      { recursive: true, force: true })
+  rmSync(FRONTEND_STORE, { recursive: true, force: true })
+  rmSync(BACKEND_STORE,  { recursive: true, force: true })
+
+  vcs(HUB_STORE,      'init')
+  vcs(FRONTEND_STORE, 'init')
+  vcs(BACKEND_STORE,  'init')
+  console.log('  hub store:      ', HUB_STORE)
+  console.log('  frontend store: ', FRONTEND_STORE)
+  console.log('  backend store:  ', BACKEND_STORE)
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('Project A: Frontend agent defines API contract')
+
+  const feStack = vcs(FRONTEND_STORE, 'stack', 'open', '--agent', 'agent-ui').stack_id
+  console.log(`  stack: ${feStack}`)
+
+  // The shared API contract that both teams edit
+  const contractByFrontend = `# API Contract
+
+## Auth
+
+POST /auth/login
+Body: { email: string, password: string }
+Returns: { token: string, user: User }
+`
+
+  const t1 = tmpFile(contractByFrontend); tmpFiles.push(t1)
+  vcs(FRONTEND_STORE, 'edit', feStack, 'shared/api-contract.md',
+    '--content-file', t1,
+    '--reason', 'define auth endpoint as /auth/login',
+    '--task-ref', 'FE-101',
+  )
+
+  // The frontend also writes its own component
+  const apiClient = `// api-client.ts — generated by agent-ui
+export const login = (email: string, password: string) =>
+  fetch('/auth/login', {      // ← uses /auth/login
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
+`
+  const t2 = tmpFile(apiClient); tmpFiles.push(t2)
+  vcs(FRONTEND_STORE, 'edit', feStack, 'frontend/src/api-client.ts',
+    '--content-file', t2,
+    '--reason', 'implement login call to /auth/login',
+  )
+
+  vcs(FRONTEND_STORE, 'stack', 'close', feStack)
+  console.log('  ✓ frontend agent done (2 changes)')
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('Project B: Backend agent defines API contract (DIFFERENT endpoint!)')
+
+  const beStack = vcs(BACKEND_STORE, 'stack', 'open', '--agent', 'agent-api').stack_id
+  console.log(`  stack: ${beStack}`)
+
+  // Backend agent uses a DIFFERENT endpoint name → cross-project conflict!
+  const contractByBackend = `# API Contract
+
+## Auth
+
+POST /auth/signin
+Body: { email: string, password: string }
+Returns: { access_token: string, user: User }
+`
+
+  const t3 = tmpFile(contractByBackend); tmpFiles.push(t3)
+  vcs(BACKEND_STORE, 'edit', beStack, 'shared/api-contract.md',
+    '--content-file', t3,
+    '--reason', 'define auth endpoint as /auth/signin',
+    '--task-ref', 'BE-42',
+  )
+
+  // Backend also writes its route handler
+  const authRoute = `// auth.ts — generated by agent-api
+router.post('/auth/signin', async (req, res) => {  // ← uses /auth/signin
+  const { email, password } = req.body
+  const user = await authenticate(email, password)
+  res.json({ access_token: generateToken(user), user })
+})
+`
+  const t4 = tmpFile(authRoute); tmpFiles.push(t4)
+  vcs(BACKEND_STORE, 'edit', beStack, 'backend/src/routes/auth.ts',
+    '--content-file', t4,
+    '--reason', 'implement POST /auth/signin handler',
+  )
+
+  vcs(BACKEND_STORE, 'stack', 'close', beStack)
+  console.log('  ✓ backend agent done (2 changes)')
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('Hub — init a dedicated hub stack for each project and record their changes')
+
+  // The hub re-records both projects' changes with namespaced agents.
+  // In a real setup, `POST /api/vcs/push` would handle this via HTTP.
+  // Here we simulate it directly using the CLI.
+
+  const hubFeStack = vcs(HUB_STORE, 'stack', 'open', '--agent', 'frontend/agent-ui').stack_id
+  const hubBeStack = vcs(HUB_STORE, 'stack', 'open', '--agent', 'backend/agent-api').stack_id
+
+  // Re-record frontend changes in hub
+  const t5 = tmpFile(contractByFrontend); tmpFiles.push(t5)
+  vcs(HUB_STORE, 'edit', hubFeStack, 'shared/api-contract.md',
+    '--content-file', t5, '--reason', '[frontend] define /auth/login', '--task-ref', 'FE-101')
+  const t6 = tmpFile(apiClient); tmpFiles.push(t6)
+  vcs(HUB_STORE, 'edit', hubFeStack, 'frontend/src/api-client.ts',
+    '--content-file', t6, '--reason', '[frontend] implement login call')
+  vcs(HUB_STORE, 'stack', 'close', hubFeStack)
+
+  // Re-record backend changes in hub
+  const t7 = tmpFile(contractByBackend); tmpFiles.push(t7)
+  vcs(HUB_STORE, 'edit', hubBeStack, 'shared/api-contract.md',
+    '--content-file', t7, '--reason', '[backend] define /auth/signin', '--task-ref', 'BE-42')
+  const t8 = tmpFile(authRoute); tmpFiles.push(t8)
+  vcs(HUB_STORE, 'edit', hubBeStack, 'backend/src/routes/auth.ts',
+    '--content-file', t8, '--reason', '[backend] implement /auth/signin')
+  vcs(HUB_STORE, 'stack', 'close', hubBeStack)
+
+  console.log(`  frontend stack in hub: ${hubFeStack.slice(0, 12)}…`)
+  console.log(`  backend  stack in hub: ${hubBeStack.slice(0, 12)}…`)
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('Hub — open cross-project view and detect conflicts')
+
+  const viewId = vcs(HUB_STORE, 'view', 'open',
+    '--base', '',
+    '--stacks', [hubFeStack, hubBeStack].join(','),
+  ).view_id
+
+  const files     = vcs(HUB_STORE, 'view', 'ls', viewId)?.files ?? []
+  const conflicts = vcs(HUB_STORE, 'view', 'conflicts', viewId) ?? []
+
+  console.log(`\n  Files in cross-project view (${files.length}):`)
+  for (const f of files) console.log(`    ${f}`)
+
+  console.log(`\n  Conflicts (${conflicts.length}):`)
+  if (conflicts.length === 0) {
+    console.log('    (none)')
+  } else {
+    for (const c of conflicts) {
+      const resolved = c.resolution ? '✓ resolved' : '⚡ UNRESOLVED'
+      console.log(`    ${resolved}  ${c.path}`)
+      for (const cand of c.candidates) {
+        const agent = cand.stack_id === hubFeStack ? 'frontend/agent-ui' : 'backend/agent-api'
+        console.log(`      └─ ${agent}  (stack ${cand.stack_id.slice(0, 8)}…)`)
+      }
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('Hub — orchestrator resolves: backend wins (they own the contract)')
+
+  if (conflicts.length > 0) {
+    const t = Date.now()
+    const conflict = conflicts.find(c => c.path === 'shared/api-contract.md')
+    if (conflict && !conflict.resolution) {
+      vcs(HUB_STORE, 'view', 'resolve', conflict.conflict_id, '--pick', hubBeStack)
+      console.log(`  → resolved shared/api-contract.md in ${Date.now() - t}ms`)
+      console.log(`    winner: backend/agent-api (/auth/signin)`)
+      console.log()
+      console.log('  Action items surfaced before any code was deployed:')
+      console.log('    ✗ frontend/src/api-client.ts calls /auth/login')
+      console.log('    ✓ backend/src/routes/auth.ts serves /auth/signin')
+      console.log('    → agent-ui must update its fetch call to /auth/signin')
+    }
+  } else {
+    console.log('  (no conflicts to resolve)')
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  section('Summary')
+  console.log()
+  console.log('  Two separate codebases. Two separate .vcs/ stores.')
+  console.log('  Hub aggregated both, found the cross-project conflict')
+  console.log('  on shared/api-contract.md before either project deployed.')
+  console.log()
+  console.log('  Production setup:')
+  console.log('    vcs serve --port 7474           # start hub')
+  console.log('    # Project A agent:')
+  console.log('    POST /api/vcs/push  { project_id: "frontend", stacks, changes, blobs }')
+  console.log('    # Project B agent:')
+  console.log('    POST /api/vcs/push  { project_id: "backend",  stacks, changes, blobs }')
+  console.log('    GET  /api/vcs/view/:id/conflicts  # → cross-project conflicts')
+  console.log()
+
+} finally {
+  // Cleanup temp files
+  for (const f of tmpFiles) {
+    try { rmSync(f, { force: true }) } catch {}
+  }
+}

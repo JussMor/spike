@@ -1,0 +1,7 @@
+export async function loginHandler(req: Request): Promise<Response> {
+  const { email, password } = await req.json()
+  if (email === 'user@example.com' && password === 'correct') {
+    return Response.json({ token: 'jwt-' + btoa(email) })
+  }
+  return Response.json({ error: 'Invalid credentials' }, { status: 401 })
+}

@@ -1,0 +1,14 @@
+{
+  "name": "webwright-vcs-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Webwright-style parallel agents tracked by vcs-spike",
+  "scripts": {
+    "demo":        "node src/orchestrator.js",
+    "agent":       "node src/agent.js",
+    "single":      "node src/agent.js --task login --agent dev"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}
