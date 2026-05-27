@@ -5,9 +5,12 @@
 //!   <root>/blobs/          content-addressed blob store
 
 use crate::blob::BlobStore;
-use crate::change::{compute_change_id, Change, ChangeId, ConflictId, Op, StackId, ViewId};
+use crate::change::{
+    compute_change_id, Change, ChangeId, ConflictId, EditKind, EditMetadata, EditPatch, Op,
+    StackId, ViewId,
+};
 use crate::error::{Result, VcsError};
-use crate::hub::{HubBundle, HubChange, HubFileEntry, HubStack};
+use crate::hub::{HubBundle, HubChange, HubEditMetadata, HubFileEntry, HubStack};
 use crate::intent::Intent;
 use crate::stack::{Stack, StackStatus};
 use crate::view::{state_hash, Candidate, Conflict, Resolution, View};
@@ -62,6 +65,7 @@ impl Store {
         }
         let conn = Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(SCHEMA)?;
         let blobs = BlobStore::new(path)?;
         Ok(Self {
             conn,
@@ -154,35 +158,51 @@ impl Store {
     ) -> Result<ChangeId> {
         let stk = self.require_open_stack(stack)?;
 
-        // Store the content blob
-        let blob_hash = self.blobs.put(new_content)?;
+        let base_blob_hash = self.current_file_blob_for_stack(&stk, path)?;
+        let base_content = base_blob_hash
+            .as_deref()
+            .map(|hash| self.blobs.get(hash))
+            .transpose()?;
+        let edit_plan =
+            build_edit_patch(base_blob_hash.clone(), base_content.as_deref(), new_content);
 
-        // Determine op: create if the file didn't exist at base, edit otherwise
-        let op = if self.file_exists_at_base(&stk, path)? {
+        let result_blob_hash = self.blobs.put(new_content)?;
+        let patch_blob_hash = self.blobs.put(&serde_json::to_vec(&edit_plan.patch)?)?;
+
+        let op = if base_blob_hash.is_some() {
             Op::Edit
         } else {
             Op::Create
         };
 
-        // Also store a trivial diff blob (full content for now; a real impl
-        // would compute a line diff here — noted as extension point)
-        let diff_hash = blob_hash.clone();
-
         let parent_id = stk.tip_change_id.as_deref();
         let ts = now_ms();
-        let change_id = compute_change_id(parent_id, path, Some(&diff_hash), &stk.agent_id, ts);
+        let change_id =
+            compute_change_id(parent_id, path, Some(&patch_blob_hash), &stk.agent_id, ts);
 
         self.insert_change(
             &change_id,
             parent_id,
             path,
             &op,
-            Some(&diff_hash),
+            Some(&patch_blob_hash),
             &stk.agent_id,
             &intent,
             ts,
         )?;
-        self.upsert_files_at_change(&change_id, path, Some(&blob_hash))?;
+        self.upsert_files_at_change(&change_id, path, Some(&result_blob_hash))?;
+        self.insert_edit_metadata(&EditMetadata {
+            change_id: change_id.clone(),
+            path: path.to_owned(),
+            base_blob_hash,
+            result_blob_hash: Some(result_blob_hash),
+            patch_blob_hash: Some(patch_blob_hash),
+            edit_kind: edit_plan.edit_kind,
+            start_line: edit_plan.start_line,
+            end_line: edit_plan.end_line,
+            inserted_lines: edit_plan.inserted_lines,
+            deleted_lines: edit_plan.deleted_lines,
+        })?;
         self.advance_stack_tip(stack, &change_id)?;
 
         tracing::debug!(%change_id, %path, op=%op, "edit recorded");
@@ -192,21 +212,39 @@ impl Store {
     /// Record deletion of `path`.
     pub fn delete(&self, stack: &StackId, path: &str, intent: Intent) -> Result<ChangeId> {
         let stk = self.require_open_stack(stack)?;
+        let base_blob_hash = self.current_file_blob_for_stack(&stk, path)?;
+        let patch = EditPatch::Delete {
+            base_blob_hash: base_blob_hash.clone(),
+        };
+        let patch_blob_hash = self.blobs.put(&serde_json::to_vec(&patch)?)?;
         let parent_id = stk.tip_change_id.as_deref();
         let ts = now_ms();
-        let change_id = compute_change_id(parent_id, path, None, &stk.agent_id, ts);
+        let change_id =
+            compute_change_id(parent_id, path, Some(&patch_blob_hash), &stk.agent_id, ts);
 
         self.insert_change(
             &change_id,
             parent_id,
             path,
             &Op::Delete,
-            None,
+            Some(&patch_blob_hash),
             &stk.agent_id,
             &intent,
             ts,
         )?;
         self.upsert_files_at_change(&change_id, path, None)?;
+        self.insert_edit_metadata(&EditMetadata {
+            change_id: change_id.clone(),
+            path: path.to_owned(),
+            base_blob_hash,
+            result_blob_hash: None,
+            patch_blob_hash: Some(patch_blob_hash),
+            edit_kind: EditKind::Delete,
+            start_line: None,
+            end_line: None,
+            inserted_lines: 0,
+            deleted_lines: 0,
+        })?;
         self.advance_stack_tip(stack, &change_id)?;
 
         tracing::debug!(%change_id, %path, "delete recorded");
@@ -223,18 +261,27 @@ impl Store {
         intent: Intent,
     ) -> Result<ChangeId> {
         let stk = self.require_open_stack(stack)?;
+        let base_blob_hash = self.current_file_blob_for_stack(&stk, from)?;
         let blob_hash = self.blobs.put(new_content)?;
+        let patch = EditPatch::Rename {
+            from: from.to_owned(),
+            to: to.to_owned(),
+            base_blob_hash: base_blob_hash.clone(),
+            result_blob_hash: blob_hash.clone(),
+        };
+        let patch_blob_hash = self.blobs.put(&serde_json::to_vec(&patch)?)?;
         let path = format!("{from}\x00{to}"); // encode both paths in the path field
         let parent_id = stk.tip_change_id.as_deref();
         let ts = now_ms();
-        let change_id = compute_change_id(parent_id, &path, Some(&blob_hash), &stk.agent_id, ts);
+        let change_id =
+            compute_change_id(parent_id, &path, Some(&patch_blob_hash), &stk.agent_id, ts);
 
         self.insert_change(
             &change_id,
             parent_id,
             &path,
             &Op::Rename,
-            Some(&blob_hash),
+            Some(&patch_blob_hash),
             &stk.agent_id,
             &intent,
             ts,
@@ -242,6 +289,18 @@ impl Store {
         // Delete old path, create new path in derived index
         self.upsert_files_at_change(&change_id, from, None)?;
         self.upsert_files_at_change(&change_id, to, Some(&blob_hash))?;
+        self.insert_edit_metadata(&EditMetadata {
+            change_id: change_id.clone(),
+            path: to.to_owned(),
+            base_blob_hash,
+            result_blob_hash: Some(blob_hash),
+            patch_blob_hash: Some(patch_blob_hash),
+            edit_kind: EditKind::Rename,
+            start_line: None,
+            end_line: None,
+            inserted_lines: 0,
+            deleted_lines: 0,
+        })?;
         self.advance_stack_tip(stack, &change_id)?;
 
         tracing::debug!(%change_id, %from, %to, "rename recorded");
@@ -293,6 +352,28 @@ impl Store {
         Ok(())
     }
 
+    fn insert_edit_metadata(&self, meta: &EditMetadata) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO edit_metadata
+             (change_id, path, base_blob_hash, result_blob_hash, patch_blob_hash,
+              edit_kind, start_line, end_line, inserted_lines, deleted_lines)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                meta.change_id,
+                meta.path,
+                meta.base_blob_hash,
+                meta.result_blob_hash,
+                meta.patch_blob_hash,
+                meta.edit_kind.to_string(),
+                meta.start_line,
+                meta.end_line,
+                meta.inserted_lines,
+                meta.deleted_lines,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn advance_stack_tip(&self, stack_id: &str, change_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE stacks SET tip_change_id=?1 WHERE stack_id=?2",
@@ -312,23 +393,16 @@ impl Store {
         Ok(s)
     }
 
-    /// Does the file exist at the base of this stack (i.e., before any stack edits)?
-    fn file_exists_at_base(&self, stk: &Stack, path: &str) -> Result<bool> {
+    fn current_file_blob_for_stack(&self, stk: &Stack, path: &str) -> Result<Option<String>> {
+        let stack_snapshot = self.stack_snapshot(&stk.stack_id)?;
+        if let Some(blob) = stack_snapshot.get(path) {
+            return Ok(blob.clone());
+        }
         let Some(base) = &stk.base_change_id else {
-            return Ok(false); // fresh repo — nothing exists
+            return Ok(None);
         };
-        // Walk up from tip to find what the base snapshot looked like
-        // Simplified: check files_at_change at base
-        let exists: bool = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM files_at_change WHERE change_id=?1 AND path=?2 AND blob_hash IS NOT NULL",
-                params![base, path],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false);
-        Ok(exists)
+        let base_snapshot = self.snapshot_at(base)?;
+        Ok(base_snapshot.get(path).cloned())
     }
 }
 
@@ -367,6 +441,16 @@ impl Store {
                 "INSERT INTO conflicts (conflict_id, view_id, path, candidates, resolution)
                  VALUES (?1, ?2, ?3, ?4, NULL)",
                 params![conflict_id, view_id, path, candidates_json],
+            )?;
+        }
+        for (path, (candidates, resolution)) in &merged.auto_resolved {
+            let conflict_id = new_id();
+            let candidates_json = serde_json::to_string(candidates)?;
+            let resolution_json = serde_json::to_string(resolution)?;
+            self.conn.execute(
+                "INSERT INTO conflicts (conflict_id, view_id, path, candidates, resolution)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![conflict_id, view_id, path, candidates_json, resolution_json],
             )?;
         }
 
@@ -768,6 +852,7 @@ impl Store {
             .collect::<Vec<_>>();
 
         let files = self.list_file_entries()?;
+        let edits = self.list_edit_metadata()?;
         let mut blob_hashes = BTreeSet::new();
         for change in &changes {
             if let Some(hash) = &change.diff_hash {
@@ -776,6 +861,17 @@ impl Store {
         }
         for entry in &files {
             if let Some(hash) = &entry.blob_hash {
+                blob_hashes.insert(hash.clone());
+            }
+        }
+        for edit in &edits {
+            if let Some(hash) = &edit.base_blob_hash {
+                blob_hashes.insert(hash.clone());
+            }
+            if let Some(hash) = &edit.result_blob_hash {
+                blob_hashes.insert(hash.clone());
+            }
+            if let Some(hash) = &edit.patch_blob_hash {
                 blob_hashes.insert(hash.clone());
             }
         }
@@ -791,6 +887,7 @@ impl Store {
             stacks,
             changes,
             files,
+            edits,
             blobs,
         })
     }
@@ -863,6 +960,28 @@ impl Store {
                 "INSERT OR REPLACE INTO files_at_change (change_id, path, blob_hash)
                  VALUES (?1,?2,?3)",
                 params![f.change_id, f.path, f.blob_hash],
+            )?;
+        }
+
+        // 5. Structured edit metadata.
+        for e in &bundle.edits {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO edit_metadata
+                 (change_id, path, base_blob_hash, result_blob_hash, patch_blob_hash,
+                  edit_kind, start_line, end_line, inserted_lines, deleted_lines)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![
+                    e.change_id,
+                    e.path,
+                    e.base_blob_hash,
+                    e.result_blob_hash,
+                    e.patch_blob_hash,
+                    e.edit_kind,
+                    e.start_line,
+                    e.end_line,
+                    e.inserted_lines,
+                    e.deleted_lines,
+                ],
             )?;
         }
 
@@ -992,6 +1111,7 @@ impl Store {
     ) -> Result<MergedTreeWithCandidates> {
         let mut clean: HashMap<String, Option<String>> = HashMap::new();
         let mut conflicts: HashMap<String, Vec<Candidate>> = HashMap::new();
+        let mut auto_resolved: HashMap<String, (Vec<Candidate>, Resolution)> = HashMap::new();
         let mut touched: HashMap<String, Vec<(StackId, Option<String>)>> = HashMap::new();
 
         for (sid, snap) in stack_snaps {
@@ -1007,17 +1127,39 @@ impl Store {
             if writers.len() == 1 {
                 clean.insert(path.clone(), writers[0].1.clone());
             } else {
-                // Build conflict candidates, find the tip change_id for each stack
                 let mut candidates = Vec::new();
                 for (sid, blob) in writers {
-                    let tip_cid = self.get_stack(sid)?.tip_change_id.unwrap_or_default();
+                    let tip_cid = self
+                        .latest_change_for_path_in_stack(sid, path)?
+                        .unwrap_or_else(|| {
+                            self.get_stack(sid)
+                                .ok()
+                                .and_then(|s| s.tip_change_id)
+                                .unwrap_or_default()
+                        });
                     candidates.push(Candidate {
                         stack_id: sid.clone(),
                         change_id: tip_cid,
                         blob_hash: blob.clone(),
                     });
                 }
-                conflicts.insert(path.clone(), candidates);
+
+                if let Some(merged_blob) =
+                    self.try_merge_non_overlapping_edits(path, &candidates)?
+                {
+                    clean.insert(path.clone(), Some(merged_blob.clone()));
+                    auto_resolved.insert(
+                        path.clone(),
+                        (
+                            candidates,
+                            Resolution::Merge {
+                                blob_hash: merged_blob,
+                            },
+                        ),
+                    );
+                } else {
+                    conflicts.insert(path.clone(), candidates);
+                }
             }
         }
 
@@ -1028,7 +1170,87 @@ impl Store {
             }
         }
 
-        Ok(MergedTreeWithCandidates { clean, conflicts })
+        Ok(MergedTreeWithCandidates {
+            clean,
+            conflicts,
+            auto_resolved,
+        })
+    }
+
+    fn latest_change_for_path_in_stack(
+        &self,
+        stack_id: &str,
+        path: &str,
+    ) -> Result<Option<ChangeId>> {
+        let stk = self.get_stack(stack_id)?;
+        let mut current = stk.tip_change_id;
+        while let Some(cid) = current {
+            if stk.base_change_id.as_deref() == Some(cid.as_str()) {
+                break;
+            }
+            let entries = self.file_entries_for_change(&cid)?;
+            if entries.iter().any(|entry| entry.path == path) {
+                return Ok(Some(cid));
+            }
+            current = self.get_change(&cid)?.parent_id;
+        }
+        Ok(None)
+    }
+
+    fn try_merge_non_overlapping_edits(
+        &self,
+        path: &str,
+        candidates: &[Candidate],
+    ) -> Result<Option<String>> {
+        let mut edits = Vec::new();
+        let mut base_hash: Option<String> = None;
+
+        for candidate in candidates {
+            let Some(meta) = self.get_edit_metadata(&candidate.change_id)? else {
+                return Ok(None);
+            };
+            if meta.path != path || meta.edit_kind != EditKind::ReplaceLines {
+                return Ok(None);
+            }
+            let Some(meta_base) = meta.base_blob_hash.clone() else {
+                return Ok(None);
+            };
+            if base_hash.as_deref().is_some_and(|known| known != meta_base) {
+                return Ok(None);
+            }
+            let (Some(start), Some(end), Some(patch_hash)) =
+                (meta.start_line, meta.end_line, meta.patch_blob_hash.clone())
+            else {
+                return Ok(None);
+            };
+            base_hash = Some(meta_base);
+            edits.push((start, end, patch_hash));
+        }
+
+        if ranges_overlap(&edits) {
+            return Ok(None);
+        }
+
+        let Some(base_hash) = base_hash else {
+            return Ok(None);
+        };
+        let mut lines = split_lines_keepends(&self.blobs.get(&base_hash)?);
+
+        edits.sort_by(|a, b| b.0.cmp(&a.0));
+        for (start, end, patch_hash) in edits {
+            let patch: EditPatch = serde_json::from_slice(&self.blobs.get(&patch_hash)?)?;
+            let EditPatch::ReplaceLines {
+                replacement_b64, ..
+            } = patch
+            else {
+                return Ok(None);
+            };
+            let replacement = decode_b64(&replacement_b64)?;
+            let replacement_lines = split_lines_keepends(&replacement);
+            lines.splice(start as usize..end as usize, replacement_lines);
+        }
+
+        Ok(Some(self.blobs.put(&lines.concat())?))
     }
 
     fn files_at_change_id(&self, change_id: &str) -> Result<Vec<String>> {
@@ -1069,9 +1291,171 @@ impl Store {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+
+    pub fn list_edit_metadata(&self) -> Result<Vec<HubEditMetadata>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT change_id, path, base_blob_hash, result_blob_hash, patch_blob_hash,
+                    edit_kind, start_line, end_line, inserted_lines, deleted_lines
+             FROM edit_metadata ORDER BY change_id, path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(HubEditMetadata {
+                change_id: r.get(0)?,
+                path: r.get(1)?,
+                base_blob_hash: r.get(2)?,
+                result_blob_hash: r.get(3)?,
+                patch_blob_hash: r.get(4)?,
+                edit_kind: r.get(5)?,
+                start_line: r.get(6)?,
+                end_line: r.get(7)?,
+                inserted_lines: r.get(8)?,
+                deleted_lines: r.get(9)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn get_edit_metadata(&self, change_id: &str) -> Result<Option<EditMetadata>> {
+        self.conn
+            .query_row(
+                "SELECT change_id, path, base_blob_hash, result_blob_hash, patch_blob_hash,
+                        edit_kind, start_line, end_line, inserted_lines, deleted_lines
+                 FROM edit_metadata WHERE change_id=?1",
+                params![change_id],
+                |r| {
+                    let kind: String = r.get(5)?;
+                    Ok(EditMetadata {
+                        change_id: r.get(0)?,
+                        path: r.get(1)?,
+                        base_blob_hash: r.get(2)?,
+                        result_blob_hash: r.get(3)?,
+                        patch_blob_hash: r.get(4)?,
+                        edit_kind: kind.parse().unwrap_or(EditKind::ReplaceLines),
+                        start_line: r.get(6)?,
+                        end_line: r.get(7)?,
+                        inserted_lines: r.get(8)?,
+                        deleted_lines: r.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
 }
 
 struct MergedTreeWithCandidates {
     clean: HashMap<String, Option<String>>,
     conflicts: HashMap<String, Vec<Candidate>>,
+    auto_resolved: HashMap<String, (Vec<Candidate>, Resolution)>,
+}
+
+struct EditPlan {
+    patch: EditPatch,
+    edit_kind: EditKind,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+    inserted_lines: u32,
+    deleted_lines: u32,
+}
+
+fn build_edit_patch(
+    base_blob_hash: Option<String>,
+    base_content: Option<&[u8]>,
+    new_content: &[u8],
+) -> EditPlan {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let Some(base_content) = base_content else {
+        return EditPlan {
+            patch: EditPatch::Create {
+                content_b64: B64.encode(new_content),
+                result_blob_hash: crate::blob::blake3_hex(new_content),
+            },
+            edit_kind: EditKind::Create,
+            start_line: Some(0),
+            end_line: Some(0),
+            inserted_lines: split_lines_keepends(new_content).len() as u32,
+            deleted_lines: 0,
+        };
+    };
+
+    let base_lines = split_lines_keepends(base_content);
+    let new_lines = split_lines_keepends(new_content);
+    let mut prefix = 0usize;
+    while prefix < base_lines.len()
+        && prefix < new_lines.len()
+        && base_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < base_lines.len().saturating_sub(prefix)
+        && suffix < new_lines.len().saturating_sub(prefix)
+        && base_lines[base_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let base_end = base_lines.len() - suffix;
+    let new_end = new_lines.len() - suffix;
+    let replacement = new_lines[prefix..new_end].concat();
+    let inserted_lines = new_end.saturating_sub(prefix) as u32;
+    let deleted_lines = base_end.saturating_sub(prefix) as u32;
+
+    EditPlan {
+        patch: EditPatch::ReplaceLines {
+            base_blob_hash: base_blob_hash.unwrap_or_default(),
+            result_blob_hash: crate::blob::blake3_hex(new_content),
+            start_line: prefix as u32,
+            end_line: base_end as u32,
+            replacement_b64: B64.encode(replacement),
+        },
+        edit_kind: EditKind::ReplaceLines,
+        start_line: Some(prefix as u32),
+        end_line: Some(base_end as u32),
+        inserted_lines,
+        deleted_lines,
+    }
+}
+
+fn split_lines_keepends(data: &[u8]) -> Vec<Vec<u8>> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    for (idx, byte) in data.iter().enumerate() {
+        if *byte == b'\n' {
+            lines.push(data[start..=idx].to_vec());
+            start = idx + 1;
+        }
+    }
+    if start < data.len() {
+        lines.push(data[start..].to_vec());
+    }
+    lines
+}
+
+fn ranges_overlap(edits: &[(u32, u32, String)]) -> bool {
+    let mut ranges = edits
+        .iter()
+        .map(|(start, end, _)| (*start, *end))
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    for pair in ranges.windows(2) {
+        let (_, prev_end) = pair[0];
+        let (next_start, _) = pair[1];
+        if prev_end > next_start {
+            return true;
+        }
+    }
+    false
+}
+
+fn decode_b64(input: &str) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    B64.decode(input)
+        .map_err(|e| VcsError::Other(format!("patch base64: {e}")))
 }

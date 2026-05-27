@@ -198,3 +198,86 @@ fn export_import_preserves_snapshots() {
     assert_eq!(dest.get_blob(&snapshot["a.txt"]).unwrap(), b"one");
     assert_eq!(dest.get_blob(&snapshot["b.txt"]).unwrap(), b"two");
 }
+
+#[test]
+fn edit_records_compact_patch_metadata() {
+    let (store, _dir) = store();
+    let stack = store.open_stack("agent-patch", None).unwrap();
+    store
+        .edit(
+            &stack,
+            "src/app.ts",
+            b"alpha\nbeta\ngamma\n",
+            Intent::new("create app"),
+        )
+        .unwrap();
+    store
+        .edit(
+            &stack,
+            "src/app.ts",
+            b"alpha\nBETA\ngamma\n",
+            Intent::new("change beta"),
+        )
+        .unwrap();
+
+    let bundle = store.export_bundle("patch-test").unwrap();
+    let edit = bundle
+        .edits
+        .iter()
+        .find(|edit| edit.edit_kind == "replace_lines")
+        .expect("replace-line edit metadata should be exported");
+
+    assert_eq!(edit.path, "src/app.ts");
+    assert!(edit.base_blob_hash.is_some());
+    assert!(edit.result_blob_hash.is_some());
+    assert!(edit.patch_blob_hash.is_some());
+    assert_eq!(edit.start_line, Some(1));
+    assert_eq!(edit.end_line, Some(2));
+    assert_eq!(edit.inserted_lines, 1);
+    assert_eq!(edit.deleted_lines, 1);
+}
+
+#[test]
+fn non_overlapping_line_edits_auto_merge() {
+    let (store, _dir) = store();
+    let base_stack = store.open_stack("base-agent", None).unwrap();
+    let base = store
+        .edit(
+            &base_stack,
+            "file.txt",
+            b"one\ntwo\nthree\n",
+            Intent::new("seed file"),
+        )
+        .unwrap();
+    store.close_stack(&base_stack).unwrap();
+
+    let stack_a = store.open_stack("agent-a", Some(base.clone())).unwrap();
+    store
+        .edit(
+            &stack_a,
+            "file.txt",
+            b"ONE\ntwo\nthree\n",
+            Intent::new("edit first line"),
+        )
+        .unwrap();
+    store.close_stack(&stack_a).unwrap();
+
+    let stack_b = store.open_stack("agent-b", Some(base.clone())).unwrap();
+    store
+        .edit(
+            &stack_b,
+            "file.txt",
+            b"one\ntwo\nTHREE\n",
+            Intent::new("edit third line"),
+        )
+        .unwrap();
+    store.close_stack(&stack_b).unwrap();
+
+    let view = store.open_view(base, &[stack_a, stack_b]).unwrap();
+    let conflicts = store.conflicts(&view).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert!(conflicts[0].resolution.is_some());
+
+    let content = store.read_file(&view, "file.txt").unwrap();
+    assert_eq!(content, b"ONE\ntwo\nTHREE\n");
+}
