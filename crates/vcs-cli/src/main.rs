@@ -217,6 +217,12 @@ enum StackCmd {
     Abandon { stack_id: String },
     /// Show stack info
     Info { stack_id: String },
+    /// List all stacks (optionally filter by status)
+    Ls {
+        /// Only show stacks with this status: open | closed | abandoned
+        #[arg(long)]
+        status: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -342,6 +348,36 @@ fn main() -> Result<()> {
                         );
                     },
                     || serde_json::to_value(&stk).unwrap(),
+                );
+            }
+            StackCmd::Ls { status } => {
+                let store = open_store(&sp)?;
+                let all = store.list_stacks().context("list_stacks")?;
+                let filtered: Vec<_> = match status.as_deref() {
+                    Some(filter) => all
+                        .into_iter()
+                        .filter(|s| s.status.to_string() == filter)
+                        .collect(),
+                    None => all,
+                };
+                out(
+                    json,
+                    || {
+                        if filtered.is_empty() {
+                            println!("(no stacks)");
+                        } else {
+                            for s in &filtered {
+                                println!(
+                                    "{} | {} | {} | tip={}",
+                                    &s.stack_id[..8],
+                                    s.status,
+                                    s.agent_id,
+                                    s.tip_change_id.as_deref().unwrap_or("(empty)")
+                                );
+                            }
+                        }
+                    },
+                    || serde_json::to_value(&filtered).unwrap(),
                 );
             }
         },

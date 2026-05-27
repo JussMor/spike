@@ -94,8 +94,11 @@ const TOOLS = [
   {
     name: 'vcs_status',
     description:
-      'Check whether the vcs store is initialised in the current project. ' +
-      'Call this first to know if you need to run vcs_init.',
+      'Check whether the vcs store is initialised AND whether any other sessions left ' +
+      'open stacks. ALWAYS call this at the start of every task. ' +
+      'If the response includes open_stacks (non-empty array), another Claude Code session ' +
+      'or agent left work in progress — ask the user whether to merge, abandon, or ignore ' +
+      'those stacks before starting new work. Never silently ignore open_stacks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -364,13 +367,32 @@ function handleTool(name, args) {
         if (r?.stack_id) {
           runVcs([...store, 'stack', 'abandon', r.stack_id])
         }
-        return { initialised: true, binary: BIN }
+        // Enumerate open stacks so new sessions can detect in-progress work
+        // from interrupted sessions and avoid silently ignoring those changes.
+        let openStacks = []
+        try {
+          const ls = runVcs([...store, 'stack', 'ls', '--status', 'open'])
+          // Filter out the status-check stack we just abandoned (already gone)
+          openStacks = (Array.isArray(ls) ? ls : []).filter(
+            s => s.agent_id !== '__status_check__'
+          )
+        } catch (_) { /* store may be empty — not an error */ }
+
+        const result = { initialised: true, binary: BIN, open_stacks: openStacks }
+        if (openStacks.length > 0) {
+          result.warning =
+            `${openStacks.length} stack(s) from other sessions are still OPEN. ` +
+            `Before starting new work, open a view over all open stacks ` +
+            `(vcs_view_open) and check for conflicts (vcs_view_conflicts). ` +
+            `If a stack belongs to an interrupted session, abandon it with vcs_stack_abandon.`
+        }
+        return result
       } catch (e) {
         const msg = e.message ?? ''
         if (msg.includes('not initialised') || msg.includes('NotInitialised')) {
           return { initialised: false, binary: BIN, message: 'Run vcs_init first.' }
         }
-        return { initialised: true, binary: BIN }
+        return { initialised: true, binary: BIN, open_stacks: [] }
       }
     }
 
