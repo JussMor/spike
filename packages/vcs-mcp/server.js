@@ -34,6 +34,11 @@
  *   vcs_view_conflicts  — list conflicts in a view
  *   vcs_resolve         — resolve a conflict
  *   vcs_log             — show change history for a stack
+ *   vcs_history         — show full store history across stacks
+ *   vcs_checkout        — materialize a change into a worktree
+ *   vcs_remote_add      — configure a named remote store
+ *   vcs_push            — push this store to a remote hub
+ *   vcs_pull            — pull a remote hub bundle into this store
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -43,7 +48,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { spawnSync } from 'node:child_process'
-import { writeFileSync, existsSync } from 'node:fs'
+import { writeFileSync, existsSync, rmSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -283,6 +288,68 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: 'vcs_history',
+    description: 'Show complete change history across all stacks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
+  {
+    name: 'vcs_checkout',
+    description: 'Materialize the tracked file tree at a change ID for replay or testing.',
+    inputSchema: {
+      type: 'object',
+      required: ['change_id'],
+      properties: {
+        change_id: { type: 'string' },
+        worktree: { type: 'string', description: 'Output directory. Defaults to CWD.' },
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
+  {
+    name: 'vcs_remote_add',
+    description: 'Add or update a named remote hub URL for this store.',
+    inputSchema: {
+      type: 'object',
+      required: ['name', 'url'],
+      properties: {
+        name: { type: 'string' },
+        url: { type: 'string' },
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
+  {
+    name: 'vcs_push',
+    description:
+      'Push this store to a remote hub as structured agent history, including edit metadata and blobs.',
+    inputSchema: {
+      type: 'object',
+      required: ['remote'],
+      properties: {
+        remote: { type: 'string', description: 'Named remote or direct http(s) URL.' },
+        project_id: { type: 'string', description: 'Project ID to include in the bundle.' },
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
+  {
+    name: 'vcs_pull',
+    description: 'Pull structured agent history from a remote hub into this store.',
+    inputSchema: {
+      type: 'object',
+      required: ['remote'],
+      properties: {
+        remote: { type: 'string', description: 'Named remote or direct http(s) URL.' },
+        store_path: { type: 'string', description: 'Optional .vcs store path.' },
+      },
+    },
+  },
 ]
 
 // ── Tool handlers ──────────────────────────────────────────────────────────
@@ -330,7 +397,7 @@ function handleTool(name, args) {
         '--content-file', tmp, '--reason', args.reason]
       if (args.task_ref) a.push('--task-ref', args.task_ref)
       const result = runVcs(a)
-      try { require('node:fs').rmSync(tmp, { force: true }) } catch {}
+      try { rmSync(tmp, { force: true }) } catch {}
       return result
     }
 
@@ -346,7 +413,7 @@ function handleTool(name, args) {
         '--content-file', tmp, '--reason', args.reason]
       if (args.task_ref) a.push('--task-ref', args.task_ref)
       const result = runVcs(a)
-      try { require('node:fs').rmSync(tmp, { force: true }) } catch {}
+      try { rmSync(tmp, { force: true }) } catch {}
       return result
     }
 
@@ -371,7 +438,7 @@ function handleTool(name, args) {
       } else if (args.merge_content) {
         const tmp = tmpWrite(args.merge_content)
         const result = runVcs([...store, 'view', 'resolve', args.conflict_id, '--merge-file', tmp])
-        try { require('node:fs').rmSync(tmp, { force: true }) } catch {}
+        try { rmSync(tmp, { force: true }) } catch {}
         return result
       }
       throw new Error('Provide either pick_stack_id or merge_content')
@@ -379,6 +446,27 @@ function handleTool(name, args) {
 
     case 'vcs_log':
       return { changes: runVcs([...store, 'log', args.stack_id]) ?? [] }
+
+    case 'vcs_history':
+      return { changes: runVcs([...store, 'history']) ?? [] }
+
+    case 'vcs_checkout': {
+      const a = [...store, 'checkout', args.change_id]
+      if (args.worktree) a.push('--worktree', args.worktree)
+      return runVcs(a)
+    }
+
+    case 'vcs_remote_add':
+      return runVcs([...store, 'remote', 'add', args.name, args.url])
+
+    case 'vcs_push': {
+      const a = [...store, 'push', args.remote]
+      if (args.project_id) a.push('--project-id', args.project_id)
+      return runVcs(a)
+    }
+
+    case 'vcs_pull':
+      return runVcs([...store, 'pull', args.remote])
 
     default:
       throw new Error(`Unknown tool: ${name}`)

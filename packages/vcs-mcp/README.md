@@ -56,6 +56,11 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 | `vcs_view_conflicts` | Detect conflicts between agents |
 | `vcs_resolve` | Resolve a conflict |
 | `vcs_log` | Show change history for a stack |
+| `vcs_history` | Show full store history across stacks |
+| `vcs_checkout` | Materialize a change into a worktree |
+| `vcs_remote_add` | Configure a named remote hub |
+| `vcs_push` | Push structured agent history to a hub |
+| `vcs_pull` | Pull structured agent history from a hub |
 
 ## What changes
 

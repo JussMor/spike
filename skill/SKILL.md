@@ -156,4 +156,8 @@ vcs view resolve $CONFLICT_ID --merge-file /tmp/merged.json
 | `vcs view conflicts <view>` | List conflicts |
 | `vcs view resolve <cid> --pick <stack>` | Resolve by picking |
 | `vcs log <stack>` | Change log for stack |
+| `vcs history` | Full change history across stacks |
 | `vcs diff <from> <to>` | Diff two change IDs |
+| `vcs checkout <change_id> --worktree <dir>` | Materialize tracked state for replay/testing |
+| `vcs push <remote-url-or-name> --project-id <id>` | Push structured agent store to hub |
+| `vcs pull <remote-url-or-name>` | Pull structured agent store from hub |

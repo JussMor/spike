@@ -1,7 +1,7 @@
 {
   "name": "vcs-openai",
   "version": "0.1.0",
-  "description": "OpenAI function definitions and plugin manifest for vcs-spike",
+  "description": "OpenAI function definitions and hub API schemas for vcs-spike",
   "license": "MIT",
   "type": "module",
   "main": "tools.js",
