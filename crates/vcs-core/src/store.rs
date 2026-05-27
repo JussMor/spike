@@ -1597,23 +1597,45 @@ impl Store {
     /// Check which OTHER open stacks have also touched `path`.
     /// Returns an empty vec if no contention — call after every `edit`.
     pub fn file_contention(&self, path: &str, caller_stack_id: &str) -> Result<FileContention> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT s.stack_id, s.agent_id, fac.change_id
-             FROM stacks s
-             JOIN files_at_change fac ON fac.change_id = s.tip_change_id
-             WHERE s.status = 'open'
-               AND s.stack_id != ?1
-               AND fac.path = ?2
-               AND fac.blob_hash IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![caller_stack_id, path], |r| {
-            Ok(ContentionEntry {
-                stack_id:  r.get(0)?,
-                agent_id:  r.get(1)?,
-                change_id: r.get(2)?,
-            })
-        })?;
-        let other_stacks = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        // Walk every open stack's full change chain (tip→base) to check whether
+        // the file appears anywhere, not just in the tip change.
+        // (The tip-only JOIN missed files edited in earlier changes of the stack.)
+        let open_stacks = self.list_stacks()?.into_iter()
+            .filter(|s| s.status == crate::stack::StackStatus::Open
+                     && s.stack_id != caller_stack_id)
+            .collect::<Vec<_>>();
+
+        let mut other_stacks = Vec::new();
+        for stk in open_stacks {
+            let snap = self.stack_snapshot(&stk.stack_id).unwrap_or_default();
+            // blob_hash = Some(hash) means file exists; None means deleted/not present
+            if matches!(snap.get(path), Some(Some(_))) {
+                // Find the change_id where this path was most recently touched
+                let change_id = snap.keys()
+                    .find(|p| p.as_str() == path)
+                    .and_then(|_| {
+                        // Walk chain to find the first (most recent) change that touched path
+                        let mut cur = stk.tip_change_id.clone();
+                        while let Some(ref cid) = cur {
+                            if stk.base_change_id.as_deref() == Some(cid.as_str()) { break; }
+                            let entries = self.file_entries_for_change(cid).unwrap_or_default();
+                            if entries.iter().any(|e| e.path == path && e.blob_hash.is_some()) {
+                                return Some(cid.clone());
+                            }
+                            cur = self.get_change(cid).ok().and_then(|c| c.parent_id);
+                        }
+                        None
+                    })
+                    .unwrap_or_default();
+
+                other_stacks.push(ContentionEntry {
+                    stack_id:  stk.stack_id.clone(),
+                    agent_id:  stk.agent_id.clone(),
+                    change_id,
+                });
+            }
+        }
+
         Ok(FileContention {
             path: path.to_owned(),
             other_stacks,

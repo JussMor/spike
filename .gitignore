@@ -4,3 +4,6 @@ examples/tanstack-vite/node_modules/
 **/*.tmp
 .vcs-spike/
 # Don't ignore .vcs/ — it's like .git/, tracked intentionally
+
+# calculator demo — live example, not committed
+examples/calculator/
