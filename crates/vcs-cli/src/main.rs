@@ -199,6 +199,10 @@ enum Cmd {
         /// Port to listen on (default: 7474)
         #[arg(long, short, default_value = "7474")]
         port: u16,
+        /// Require Authorization: Bearer <token> on push/pull endpoints.
+        /// If omitted the hub accepts unauthenticated requests.
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Session management (multi-session tracking)
@@ -221,6 +225,13 @@ enum Cmd {
         #[arg(long)]
         stack: Option<String>,
     },
+
+    /// Garbage-collect unreferenced blobs.
+    ///
+    /// Walks all non-abandoned stacks and their change chains, collects every
+    /// referenced blob hash, then removes any blob file not in that set.
+    /// Safe to run at any time — content-addressed blobs are never mutated.
+    Gc,
 }
 
 #[derive(Subcommand)]
@@ -281,7 +292,13 @@ enum SessionCmd {
 #[derive(Subcommand)]
 enum RemoteCmd {
     /// Add or update a named remote
-    Add { name: String, url: String },
+    Add {
+        name: String,
+        url: String,
+        /// Bearer token for Authorization header (stored in config.json)
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Remove a named remote
     Remove { name: String },
     /// List configured remotes
@@ -626,16 +643,18 @@ fn main() -> Result<()> {
 
         Cmd::Diff { from, to } => {
             let store = open_store(&sp)?;
-            let diff = store.diff(&from, &to).context("diff")?;
+            // diff_chain walks the chain from `to` back to `from`, returning
+            // every path touched with op=create|edit|delete (most-recent-wins).
+            // This is what the vcs-vite HMR poller needs for targeted invalidation.
+            let diff = store.diff_chain(&from, &to).context("diff")?;
             if json {
                 println!("{}", serde_json::to_string(&diff).unwrap());
             } else {
                 for e in &diff {
-                    let marker = match (&e.before_hash, &e.after_hash) {
-                        (None, Some(_)) => "A",
-                        (Some(_), None) => "D",
-                        (Some(_), Some(_)) => "M",
-                        _ => "?",
+                    let marker = match e.op.as_str() {
+                        "create" => "A",
+                        "delete" => "D",
+                        _        => "M",
                     };
                     println!("{} {}", marker, e.path);
                 }
@@ -690,16 +709,19 @@ fn main() -> Result<()> {
         }
 
         Cmd::Remote(r) => match r {
-            RemoteCmd::Add { name, url } => {
+            RemoteCmd::Add { name, url, token } => {
                 let mut config = RemoteConfig::load(&sp)?;
-                config
-                    .remotes
-                    .insert(name.clone(), normalize_remote_url(&url));
+                let entry = RemoteEntry {
+                    url: normalize_remote_url(&url),
+                    token,
+                };
+                config.remotes.insert(name.clone(), entry);
                 config.save(&sp)?;
+                let display_url = &config.remotes[&name].url;
                 out(
                     json,
-                    || println!("{name} {}", config.remotes[&name]),
-                    || json!({"ok": true, "name": name, "url": config.remotes[&name]}),
+                    || println!("{name} {display_url}"),
+                    || json!({"ok": true, "name": name, "url": display_url}),
                 );
             }
             RemoteCmd::Remove { name } => {
@@ -723,8 +745,9 @@ fn main() -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string(&config).unwrap());
                 } else {
-                    for (name, url) in &config.remotes {
-                        println!("{name}\t{url}");
+                    for (name, entry) in &config.remotes {
+                        let auth = if entry.token.is_some() { " [auth]" } else { "" };
+                        println!("{name}\t{}{auth}", entry.url);
                     }
                 }
             }
@@ -732,14 +755,19 @@ fn main() -> Result<()> {
 
         Cmd::Push { remote, project_id } => {
             let store = open_store(&sp)?;
-            let url = resolve_remote_url(&sp, &remote)?;
+            let entry = resolve_remote_entry(&sp, &remote)?;
+            let url = &entry.url;
             let project_id = project_id.unwrap_or_else(|| project_id_from_cwd());
             let bundle = store.export_bundle(&project_id).context("export bundle")?;
             let stacks = bundle.stacks.len();
             let changes = bundle.changes.len();
             let blobs = bundle.blobs.len();
             let endpoint = format!("{}/api/vcs/push", url);
-            let response: Value = ureq::post(&endpoint)
+            let mut req = ureq::post(&endpoint);
+            if let Some(ref tok) = entry.token {
+                req = req.set("Authorization", &format!("Bearer {tok}"));
+            }
+            let response: Value = req
                 .send_json(serde_json::to_value(&bundle)?)
                 .with_context(|| format!("POST {endpoint}"))?
                 .into_json()
@@ -768,9 +796,14 @@ fn main() -> Result<()> {
 
         Cmd::Pull { remote } => {
             let store = open_store(&sp)?;
-            let url = resolve_remote_url(&sp, &remote)?;
+            let entry = resolve_remote_entry(&sp, &remote)?;
+            let url = &entry.url;
             let endpoint = format!("{}/api/vcs/export", url);
-            let bundle: vcs_core::HubBundle = ureq::get(&endpoint)
+            let mut req = ureq::get(&endpoint);
+            if let Some(ref tok) = entry.token {
+                req = req.set("Authorization", &format!("Bearer {tok}"));
+            }
+            let bundle: vcs_core::HubBundle = req
                 .call()
                 .with_context(|| format!("GET {endpoint}"))?
                 .into_json()
@@ -798,13 +831,16 @@ fn main() -> Result<()> {
             );
         }
 
-        Cmd::Serve { port } => {
+        Cmd::Serve { port, token } => {
             // Ensure the hub store exists
             let store = Store::open_or_init(&sp).context("opening hub store")?;
             println!("vcs hub store: {}", sp.display());
+            if token.is_some() {
+                println!("vcs hub auth: Bearer token required on push/pull");
+            }
             // Spin up a tokio runtime only for serve (keeps other commands synchronous)
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(serve::run(store, port))?;
+            rt.block_on(serve::run(store, port, token))?;
         }
 
         Cmd::Session(s) => match s {
@@ -906,6 +942,16 @@ fn main() -> Result<()> {
                 || serde_json::to_value(&contention).unwrap(),
             );
         }
+
+        Cmd::Gc => {
+            let store = open_store(&sp)?;
+            let freed = store.gc().context("gc")?;
+            out(
+                json,
+                || println!("freed {freed} blob(s)"),
+                || json!({"ok": true, "freed_blobs": freed}),
+            );
+        }
     }
 
     Ok(())
@@ -930,10 +976,18 @@ fn read_content(file: Option<PathBuf>, stdin: bool) -> Result<Vec<u8>> {
     }
 }
 
+/// A remote entry — URL plus optional Bearer token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteEntry {
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RemoteConfig {
     #[serde(default)]
-    remotes: BTreeMap<String, String>,
+    remotes: BTreeMap<String, RemoteEntry>,
 }
 
 impl RemoteConfig {
@@ -944,7 +998,24 @@ impl RemoteConfig {
         }
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_str(&data).with_context(|| format!("parsing {}", path.display()))
+        // Try new format first; fall back to old string-map format for migration.
+        if let Ok(cfg) = serde_json::from_str::<Self>(&data) {
+            return Ok(cfg);
+        }
+        // Old format: { "remotes": { "name": "url" } }
+        #[derive(Deserialize)]
+        struct OldRemoteConfig {
+            #[serde(default)]
+            remotes: BTreeMap<String, String>,
+        }
+        if let Ok(old) = serde_json::from_str::<OldRemoteConfig>(&data) {
+            return Ok(RemoteConfig {
+                remotes: old.remotes.into_iter().map(|(k, url)| {
+                    (k, RemoteEntry { url, token: None })
+                }).collect(),
+            });
+        }
+        anyhow::bail!("could not parse {}", path.display())
     }
 
     fn save(&self, store_path: &Path) -> Result<()> {
@@ -960,9 +1031,10 @@ fn remote_config_path(store_path: &Path) -> PathBuf {
     store_path.join("config.json")
 }
 
-fn resolve_remote_url(store_path: &Path, remote: &str) -> Result<String> {
+/// Resolve a remote name or URL to a `RemoteEntry`.
+fn resolve_remote_entry(store_path: &Path, remote: &str) -> Result<RemoteEntry> {
     if remote.starts_with("http://") || remote.starts_with("https://") {
-        return Ok(normalize_remote_url(remote));
+        return Ok(RemoteEntry { url: normalize_remote_url(remote), token: None });
     }
     let config = RemoteConfig::load(store_path)?;
     config

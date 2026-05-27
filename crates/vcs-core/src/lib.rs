@@ -41,5 +41,5 @@ pub use hub::{HubBundle, HubChange, HubEditMetadata, HubFileEntry, HubStack};
 pub use intent::Intent;
 pub use session::{AgentOverview, ContentionEntry, FileContention, Session, SessionSummary};
 pub use stack::{Stack, StackStatus};
-pub use store::{DiffEntry, Store};
+pub use store::{ChainDiffEntry, DiffEntry, Store};
 pub use view::{Candidate, Conflict, Resolution, View};
