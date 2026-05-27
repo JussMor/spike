@@ -53,6 +53,25 @@ CREATE TABLE IF NOT EXISTS files_at_change (
 
 CREATE INDEX IF NOT EXISTS idx_fac_path ON files_at_change(path, change_id);
 
+-- ── structured edit metadata ──────────────────────────────────────────────
+-- Keeps agent edits compact and inspectable. The result blob remains in
+-- files_at_change for deterministic checkout, while patch_blob_hash stores a
+-- line-range operation describing how the agent changed the previous content.
+CREATE TABLE IF NOT EXISTS edit_metadata (
+    change_id        TEXT PRIMARY KEY,
+    path             TEXT NOT NULL,
+    base_blob_hash   TEXT,
+    result_blob_hash TEXT,
+    patch_blob_hash  TEXT,
+    edit_kind        TEXT NOT NULL,
+    start_line       INTEGER,
+    end_line         INTEGER,
+    inserted_lines   INTEGER NOT NULL DEFAULT 0,
+    deleted_lines    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_edit_metadata_path ON edit_metadata(path);
+
 -- ── conflicts (first-class data, not error states) ────────────────────────
 CREATE TABLE IF NOT EXISTS conflicts (
     conflict_id TEXT PRIMARY KEY,

@@ -32,9 +32,11 @@ pub mod view;
 
 // Re-export the main surface area
 pub use blob::BlobStore;
-pub use change::{Change, ChangeId, ConflictId, Op, StackId, ViewId};
+pub use change::{
+    Change, ChangeId, ConflictId, EditKind, EditMetadata, EditPatch, Op, StackId, ViewId,
+};
 pub use error::{Result, VcsError};
-pub use hub::{HubBundle, HubChange, HubFileEntry, HubStack};
+pub use hub::{HubBundle, HubChange, HubEditMetadata, HubFileEntry, HubStack};
 pub use intent::Intent;
 pub use stack::{Stack, StackStatus};
 pub use store::{DiffEntry, Store};
