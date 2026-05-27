@@ -24,11 +24,15 @@ echo "[vcs-spike/session-start] project: $PROJECT_DIR"
 
 # ── 1. Build the vcs binary ───────────────────────────────────────────────
 VCS_BIN="$PROJECT_DIR/target/release/vcs"
+NEWEST_SRC=$(find "$PROJECT_DIR/crates" -name "*.rs" -newer "$VCS_BIN" 2>/dev/null | head -1)
 if [ ! -f "$VCS_BIN" ]; then
   echo "[vcs-spike/session-start] Building vcs binary (first run — may take ~60s)..."
   cargo build --release -p vcs-cli
+elif [ -n "$NEWEST_SRC" ]; then
+  echo "[vcs-spike/session-start] Source newer than binary — rebuilding..."
+  cargo build --release -p vcs-cli
 else
-  echo "[vcs-spike/session-start] vcs binary already built: $VCS_BIN"
+  echo "[vcs-spike/session-start] vcs binary up to date: $VCS_BIN"
 fi
 
 # Export VCS_BIN and store path for the session
