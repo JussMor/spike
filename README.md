@@ -1,8 +1,8 @@
 # vcs-spike
 
-**Agent-native version control — the spike that answers: can agents produce structured, conflict-aware changes at scale?**
+**Agent-native version control — the spike that answers: can agents produce structured, conflict-aware changes at scale, across multiple projects?**
 
-The answer is yes. This repo proves it end-to-end: from the Rust data model through a CLI you install like a binary, to parallel Webwright-style agents writing Playwright tests with stable `data-testid` selectors, to a live TanStack Query dashboard showing everything in the browser.
+The answer is yes. This repo proves it end-to-end: Rust data model → CLI you install in one command → parallel agents writing structured changes → a hub server that connects separate codebases → live TanStack Query dashboard showing everything in the browser.
 
 ---
 
@@ -22,37 +22,60 @@ Agents know exactly what they touched and why. They don't need a watcher or a st
 ```
 vcs-spike/
 ├── crates/
-│   ├── vcs-core/          Rust library — data model, store, view engine
-│   └── vcs-cli/           vcs binary — git-like CLI, auto-detects .vcs/
+│   ├── vcs-core/               Rust library — data model, store, view engine
+│   └── vcs-cli/                vcs binary — git-like CLI + HTTP hub server
 ├── examples/
-│   ├── webwright-demo/    Webwright-style parallel agents writing Playwright specs
-│   └── tanstack-vite/     Real Vite + TanStack project tracked by vcs
-│       └── e2e/           Playwright e2e tests — all selectors via data-testid
+│   ├── webwright-demo/         Single-project: parallel agents, conflict detected
+│   ├── tanstack-vite/          Real Vite + TanStack project tracked by vcs
+│   │   └── e2e/                Playwright tests — all selectors via data-testid
+│   └── multi-project-demo/     Two separate codebases → one hub → cross-project conflict
+├── packages/
+│   └── vcs-npm/                npm package (npm install -g vcs-spike)
 ├── docs/
-│   └── cicd-architecture.md  Pipeline design, conflict gate, e2e strategy
+│   └── cicd-architecture.md   Pipeline design, conflict gate, e2e strategy
+├── install.sh                  One-command curl installer
 └── skill/
-    └── SKILL.md           Skill manifest — teaches any agent to drive vcs
+    └── SKILL.md                Skill manifest — teaches any agent to drive vcs
 ```
 
 ---
 
-## Install (two files, that's it)
+## Install
+
+### Option 1 — curl (any machine with Rust)
 
 ```bash
-# Build the binary
-cargo build --release
-
-# Put it on PATH — or just reference it directly
-cp target/release/vcs /usr/local/bin/vcs
-
-# In any project:
-vcs init         # creates .vcs/ here — like git init
-vcs stack open --agent me --json
-vcs edit <stack> src/App.tsx --content-file src/App.tsx --reason "why"
-vcs stack close <stack>
+curl -fsSL https://raw.githubusercontent.com/JussMor/spike/main/install.sh | sh
 ```
 
-The binary auto-detects `.vcs/` by walking up from CWD — **exactly like git finds `.git/`**. No config file, no env var needed.
+Clones the repo into `~/.vcs-spike-src/`, builds the release binary, installs to `/usr/local/bin/vcs`. If Rust isn't installed it installs that first via rustup.
+
+### Option 2 — npm (Node.js projects)
+
+```bash
+npm install -g vcs-spike      # installs vcs to PATH
+# or per-project:
+npm install vcs-spike
+```
+
+`postinstall` auto-finds the binary: `VCS_BIN` env → workspace sibling → system PATH → build from source.
+
+### Option 3 — build from source
+
+```bash
+cargo build --release
+cp target/release/vcs /usr/local/bin/vcs
+```
+
+### Start using it
+
+```bash
+cd your-project
+vcs init                # creates .vcs/  (like git init)
+vcs --help              # full command reference
+```
+
+The binary auto-detects `.vcs/` by walking up from CWD — **exactly like git finds `.git/`**.
 
 ---
 
@@ -95,7 +118,7 @@ No agent coordinates with another agent. The orchestrator sees everything after.
 
 ## Examples
 
-### Webwright-style parallel agents
+### 1. Webwright-style parallel agents (single project)
 
 Two agents run simultaneously. Both write Playwright specs. Both touch `LoginForm.tsx` → conflict detected automatically.
 
@@ -113,23 +136,123 @@ Conflicts: 1  ⚡ src/features/auth/LoginForm.tsx (2 candidates)
 → resolved by orchestrator (169ms total)
 ```
 
-### TanStack Vite — real project tracked by vcs
+### 2. Multi-project hub (frontend + backend, separated codebases)
+
+The core new capability: two projects that live in separate repos, each with their own `.vcs/` store, push to a shared hub. The hub detects cross-project conflicts before anything is deployed.
+
+```bash
+cd examples/multi-project-demo
+VCS_BIN=../../target/release/vcs node orchestrator.js
+```
+
+```
+Setup — init three isolated stores
+  hub store:       .vcs-hub/
+  frontend store:  .vcs-frontend/
+  backend store:   .vcs-backend/
+
+Project A: Frontend agent defines API contract
+  ✓ frontend agent done (2 changes)
+    → shared/api-contract.md:  POST /auth/login
+
+Project B: Backend agent defines API contract (DIFFERENT endpoint!)
+  ✓ backend agent done (2 changes)
+    → shared/api-contract.md:  POST /auth/signin
+
+Hub — cross-project view
+  Files: backend/src/routes/auth.ts, frontend/src/api-client.ts, shared/api-contract.md
+
+  Conflicts (1):
+    ⚡ UNRESOLVED  shared/api-contract.md
+      └─ frontend/agent-ui  (POST /auth/login)
+      └─ backend/agent-api  (POST /auth/signin)
+
+→ resolved in 9ms  (backend wins — they own the contract)
+  Action: agent-ui must update fetch call from /auth/login → /auth/signin
+```
+
+The conflict is surfaced **before any code is merged or deployed**. Without the hub, the mismatch only appears when the e2e tests fail in production.
+
+### 3. TanStack Vite — live dashboard
 
 ```bash
 cd examples/tanstack-vite
 VCS_BIN=../../target/release/vcs npm run vcs:init   # vcs init in this project
-VCS_BIN=../../target/release/vcs npm run vcs:demo   # track real source files
+VCS_BIN=../../target/release/vcs npm run vcs:demo   # seed store with demo state
 VCS_BIN=../../target/release/vcs npm run vcs:agents # 4 parallel workers
-npm run dev                                          # live dashboard at :5173
+npm run dev                                          # dashboard at :5173
 ```
 
-### E2e tests (Playwright, all data-testid)
+### 4. E2e tests (Playwright, all data-testid)
 
 ```bash
 cd examples/tanstack-vite
 npm run e2e          # run against running dev server
 npm run e2e:ui       # Playwright UI mode
 npm run e2e:report   # open HTML report
+```
+
+---
+
+## `vcs serve` — the hub server
+
+`vcs serve` turns any vcs store into an HTTP API server. Projects in other repos push their stacks to it; the hub builds a cross-project view and surfaces conflicts.
+
+```bash
+# On a shared machine (or localhost):
+vcs init --store /tmp/hub
+vcs serve --store /tmp/hub --port 7474
+```
+
+```
+vcs hub listening on http://0.0.0.0:7474
+  Dashboard:  point the tanstack-vite UI at http://localhost:7474
+  Push URL:   POST http://localhost:7474/api/vcs/push
+```
+
+### Read endpoints (same shape as Vite plugin — existing UI works against hub)
+
+```
+GET  /api/vcs/status
+GET  /api/vcs/changes
+GET  /api/vcs/stacks
+GET  /api/vcs/views
+GET  /api/vcs/active-view
+GET  /api/vcs/view/:id/files
+GET  /api/vcs/view/:id/conflicts
+```
+
+### Write endpoints (for agents and push protocol)
+
+```
+POST /api/vcs/stacks/open           { agent_id, base_change_id? }
+POST /api/vcs/stacks/:id/close
+POST /api/vcs/edit                  { stack_id, path, content_b64, intent }
+POST /api/vcs/delete                { stack_id, path, intent }
+POST /api/vcs/views/open            { base_change_id, stack_ids: [] }
+POST /api/vcs/conflicts/:id/resolve { pick?: stack_id, merge_content_b64? }
+POST /api/vcs/push                  { project_id, stacks[], changes[], blobs{} }
+```
+
+### Connecting a project to the hub (Node.js)
+
+```js
+import { VcsRemoteClient } from 'vcs-spike/remote'
+
+const hub = new VcsRemoteClient('http://hub.internal:7474')
+
+// Agent in Project A (frontend):
+const stackId = await hub.stackOpen('agent-ui')
+await hub.edit(stackId, 'shared/api-contract.md', content, {
+  reason: 'define POST /auth/login',
+  task_ref: 'FE-101',
+})
+await hub.stackClose(stackId)
+
+// After all agents are done — build cross-project view:
+const viewId = await hub.viewOpen('', [frontendStackId, backendStackId])
+const conflicts = await hub.viewConflicts(viewId)
+// [{ path: 'shared/api-contract.md', candidates: [...] }]
 ```
 
 ---
@@ -160,18 +283,19 @@ Convention: `<feature>-<element>` — `login-form`, `login-email`, `dashboard-he
 ```
 push / PR
 │
-├── cargo test          (11 tests, fast)
-├── vcs conflict gate   (webwright demo: zero unresolved conflicts)
-└── vite build          (tsc + rollup)
+├── cargo test            (11 tests, fast)
+├── vcs conflict gate     single-project: webwright demo — zero unresolved conflicts
+│                         multi-project:  hub demo        — cross-project conflicts resolved
+└── vite build            (tsc + rollup, no type errors)
          │ all green
          ▼
-    Playwright e2e      (separate job — browser, slow, retries=2)
+    Playwright e2e         (separate job — browser, Vite dev server, retries=2)
          │ green
          ▼
     merge allowed
 ```
 
-The **vcs conflict gate** is the key: agents can never silently overwrite each other's work. The orchestrator must resolve all conflicts before the e2e job runs.
+The **vcs conflict gate** is the key: agents can never silently overwrite each other's work — in the same project or across projects. Both orchestrators must exit zero before e2e runs.
 
 See `docs/cicd-architecture.md` for the full GitHub Actions workflow.
 
@@ -187,15 +311,27 @@ See `docs/cicd-architecture.md` for the full GitHub Actions workflow.
 | What's the view computation cost? | O(changes in stacks) — negligible at <1000 changes |
 | Can this integrate with Webwright? | ✓ adapter wraps agent writes; skill manifest teaches the agent |
 | How do e2e tests survive agent refactors? | data-testid contract — explicit, stable, breaks loudly if removed |
+| Can separate projects share change awareness? | ✓ vcs serve hub — POST /api/vcs/push from any project, cross-project view |
+| One install command? | ✓ curl install.sh \| sh  or  npm install -g vcs-spike |
 
 ---
 
-## What's not built (intentional)
+## What's built vs what's next
 
-| Missing | Why |
+| Feature | Status |
 |---|---|
-| Filesystem materializer | Post-spike — `vcs checkout <view> <dir>` |
-| Filesystem watcher | Not needed for agents; needed for human dev UX |
-| Remotes / push / pull | Post-spike — views already define the merge protocol |
-| Conflict resolution UI | Conflicts are data; the orchestrator resolves |
-| ACL / secrets | Hook point is obvious; don't build what you don't need yet |
+| `vcs init / edit / delete / rename` | ✅ built |
+| `vcs stack open / close / abandon` | ✅ built |
+| `vcs view open / ls / conflicts / resolve` | ✅ built |
+| `vcs serve --port` (HTTP hub) | ✅ built |
+| curl one-command installer | ✅ built |
+| npm package (`vcs-spike`) | ✅ built |
+| Webwright integration demo | ✅ built |
+| Multi-project hub demo | ✅ built |
+| Playwright e2e with data-testid | ✅ built |
+| GitHub Actions CI (4-job pipeline) | ✅ built |
+| Filesystem materializer (`vcs checkout`) | 🔜 post-spike |
+| Filesystem watcher (human dev UX) | 🔜 post-spike |
+| Conflict resolution UI | 🔜 post-spike |
+| ACL / secrets / auth on hub | 🔜 post-spike |
+| Binary releases (GitHub Releases) | 🔜 post-spike |
