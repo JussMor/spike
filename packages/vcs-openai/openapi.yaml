@@ -59,6 +59,22 @@ paths:
                 items:
                   $ref: '#/components/schemas/Change'
 
+  /api/vcs/edits:
+    get:
+      tags: [changes]
+      summary: List structured edit metadata
+      description: Compact per-change edit operations with base/result/patch blobs and changed line ranges.
+      operationId: listEditMetadata
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EditMetadata'
+
   /api/vcs/stacks:
     get:
       tags: [stacks]
@@ -336,9 +352,10 @@ paths:
       tags: [hub]
       summary: Push a project bundle to the hub
       description: |
-        Receives a bundle of stacks + changes + blobs from a remote project
-        and ingests them into the hub store. After all projects have pushed,
-        open a cross-project view via POST /api/vcs/views/open.
+        Receives a bundle of stacks, changes, structured edit metadata,
+        file-state rows, and blobs from a remote project and ingests them
+        into the hub store. After all projects have pushed, open a
+        cross-project view via POST /api/vcs/views/open.
 
         Idempotent — re-pushing the same bundle is safe (INSERT OR IGNORE).
       operationId: pushBundle
@@ -361,6 +378,44 @@ paths:
                   blobs_stored:     { type: integer }
                   stacks_imported:  { type: integer }
                   changes_imported: { type: integer }
+
+  /api/vcs/export:
+    get:
+      tags: [hub]
+      summary: Export this store as a hub bundle
+      description: Returns the complete structured store bundle used by vcs pull.
+      operationId: exportBundle
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Store bundle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HubBundle'
+
+  /api/vcs/blobs/{hash}:
+    get:
+      tags: [hub]
+      summary: Fetch a raw blob by hash
+      operationId: getBlob
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Raw blob bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
 
 components:
   schemas:
@@ -416,9 +471,26 @@ components:
         op:
           type: string
           enum: [create, edit, delete, rename]
+        diff_hash:  { type: string, nullable: true, description: Patch blob hash for edits/deletes/renames }
         agent_id:   { type: string }
         intent:     { $ref: '#/components/schemas/Intent' }
         created_at: { type: integer, description: Unix ms }
+
+    EditMetadata:
+      type: object
+      properties:
+        change_id:        { type: string }
+        path:             { type: string }
+        base_blob_hash:   { type: string, nullable: true }
+        result_blob_hash: { type: string, nullable: true }
+        patch_blob_hash:  { type: string, nullable: true }
+        edit_kind:
+          type: string
+          enum: [create, replace_lines, delete, rename]
+        start_line:       { type: integer, nullable: true }
+        end_line:         { type: integer, nullable: true }
+        inserted_lines:   { type: integer }
+        deleted_lines:    { type: integer }
 
     Stack:
       type: object
@@ -488,6 +560,20 @@ components:
               reason:     { type: string }
               task_ref:   { type: string, nullable: true }
               created_at: { type: integer }
+        files:
+          type: array
+          description: Per-change file-state rows used to reconstruct snapshots.
+          items:
+            type: object
+            properties:
+              change_id: { type: string }
+              path:      { type: string }
+              blob_hash: { type: string, nullable: true }
+        edits:
+          type: array
+          description: Structured edit metadata for compact agent review and conflict reasoning.
+          items:
+            $ref: '#/components/schemas/EditMetadata'
         blobs:
           type: object
           additionalProperties:
