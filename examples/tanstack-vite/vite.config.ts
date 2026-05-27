@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-// @ts-ignore — JS plugin, types not needed
+// @ts-expect-error — JS plugin, types not needed
 import { vcsPlugin } from './vcs-integration/vite-plugin.js'
 
 /**

@@ -225,6 +225,8 @@ GET  /api/vcs/views
 GET  /api/vcs/active-view
 GET  /api/vcs/view/:id/files
 GET  /api/vcs/view/:id/conflicts
+GET  /api/vcs/export
+GET  /api/vcs/blobs/:hash
 ```
 
 ### Write endpoints (for agents and push protocol)
@@ -236,8 +238,34 @@ POST /api/vcs/edit                  { stack_id, path, content_b64, intent }
 POST /api/vcs/delete                { stack_id, path, intent }
 POST /api/vcs/views/open            { base_change_id, stack_ids: [] }
 POST /api/vcs/conflicts/:id/resolve { pick?: stack_id, merge_content_b64? }
-POST /api/vcs/push                  { project_id, stacks[], changes[], blobs{} }
+POST /api/vcs/push                  { project_id, stacks[], changes[], files[], blobs{} }
 ```
+
+### Remote sync between stores
+
+`vcs serve` is bidirectional: a local store can push its complete structured history to a hub, and another store can pull that bundle back down.
+
+```bash
+vcs serve --store /tmp/hub --port 7474
+
+vcs remote add hub http://localhost:7474
+vcs push hub --project-id frontend
+vcs pull hub
+```
+
+Bundles include stacks, changes, per-change file-state rows, and content-addressed blobs, so pulled stores can open views, detect conflicts, and checkout historical states without needing the original project directory.
+
+### History checkout
+
+Agents can materialize the file tree at any recorded change:
+
+```bash
+vcs history
+vcs checkout <change_id>
+vcs checkout <change_id> --worktree /tmp/replay
+```
+
+Checkout composes the parent chain for `<change_id>`, writes the tracked files in that snapshot, and removes tracked files that are absent from that point in history.
 
 ### Connecting a project to the hub (Node.js)
 
@@ -416,7 +444,8 @@ See `docs/cicd-architecture.md` for the full GitHub Actions workflow.
 | Claude Code slash commands | ✅ built |
 | OpenAI function definitions (`vcs-openai`) | ✅ built |
 | OpenAPI 3.1 spec for hub API | ✅ built |
-| Filesystem materializer (`vcs checkout`) | 🔜 post-spike |
+| Remote push/pull between stores | ✅ built |
+| History navigation / filesystem materializer (`vcs checkout`) | ✅ built |
 | Filesystem watcher (human dev UX) | 🔜 post-spike |
 | Conflict resolution UI | 🔜 post-spike |
 | ACL / secrets / auth on hub | 🔜 post-spike |

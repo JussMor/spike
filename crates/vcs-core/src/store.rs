@@ -7,21 +7,21 @@
 use crate::blob::BlobStore;
 use crate::change::{compute_change_id, Change, ChangeId, ConflictId, Op, StackId, ViewId};
 use crate::error::{Result, VcsError};
-use crate::hub::HubBundle;
+use crate::hub::{HubBundle, HubChange, HubFileEntry, HubStack};
 use crate::intent::Intent;
 use crate::stack::{Stack, StackStatus};
 use crate::view::{state_hash, Candidate, Conflict, Resolution, View};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCHEMA: &str = include_str!("schema.sql");
 
 pub struct Store {
-    conn:  Connection,
+    conn: Connection,
     blobs: BlobStore,
-    root:  PathBuf,
+    root: PathBuf,
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -47,7 +47,11 @@ impl Store {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch(SCHEMA)?;
         let blobs = BlobStore::new(path)?;
-        Ok(Self { conn, blobs, root: path.to_path_buf() })
+        Ok(Self {
+            conn,
+            blobs,
+            root: path.to_path_buf(),
+        })
     }
 
     /// Open an existing store at `path`.
@@ -59,7 +63,11 @@ impl Store {
         let conn = Connection::open(&db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         let blobs = BlobStore::new(path)?;
-        Ok(Self { conn, blobs, root: path.to_path_buf() })
+        Ok(Self {
+            conn,
+            blobs,
+            root: path.to_path_buf(),
+        })
     }
 
     /// Open if exists, init if not.
@@ -117,11 +125,11 @@ impl Store {
                 params![stack_id],
                 |row| {
                     Ok(Stack {
-                        stack_id:       row.get(0)?,
-                        agent_id:       row.get(1)?,
+                        stack_id: row.get(0)?,
+                        agent_id: row.get(1)?,
                         base_change_id: row.get(2)?,
-                        tip_change_id:  row.get(3)?,
-                        status:         {
+                        tip_change_id: row.get(3)?,
+                        status: {
                             let s: String = row.get(4)?;
                             s.parse::<StackStatus>().unwrap_or(StackStatus::Open)
                         },
@@ -164,7 +172,16 @@ impl Store {
         let ts = now_ms();
         let change_id = compute_change_id(parent_id, path, Some(&diff_hash), &stk.agent_id, ts);
 
-        self.insert_change(&change_id, parent_id, path, &op, Some(&diff_hash), &stk.agent_id, &intent, ts)?;
+        self.insert_change(
+            &change_id,
+            parent_id,
+            path,
+            &op,
+            Some(&diff_hash),
+            &stk.agent_id,
+            &intent,
+            ts,
+        )?;
         self.upsert_files_at_change(&change_id, path, Some(&blob_hash))?;
         self.advance_stack_tip(stack, &change_id)?;
 
@@ -179,7 +196,16 @@ impl Store {
         let ts = now_ms();
         let change_id = compute_change_id(parent_id, path, None, &stk.agent_id, ts);
 
-        self.insert_change(&change_id, parent_id, path, &Op::Delete, None, &stk.agent_id, &intent, ts)?;
+        self.insert_change(
+            &change_id,
+            parent_id,
+            path,
+            &Op::Delete,
+            None,
+            &stk.agent_id,
+            &intent,
+            ts,
+        )?;
         self.upsert_files_at_change(&change_id, path, None)?;
         self.advance_stack_tip(stack, &change_id)?;
 
@@ -201,10 +227,18 @@ impl Store {
         let path = format!("{from}\x00{to}"); // encode both paths in the path field
         let parent_id = stk.tip_change_id.as_deref();
         let ts = now_ms();
-        let change_id =
-            compute_change_id(parent_id, &path, Some(&blob_hash), &stk.agent_id, ts);
+        let change_id = compute_change_id(parent_id, &path, Some(&blob_hash), &stk.agent_id, ts);
 
-        self.insert_change(&change_id, parent_id, &path, &Op::Rename, Some(&blob_hash), &stk.agent_id, &intent, ts)?;
+        self.insert_change(
+            &change_id,
+            parent_id,
+            &path,
+            &Op::Rename,
+            Some(&blob_hash),
+            &stk.agent_id,
+            &intent,
+            ts,
+        )?;
         // Delete old path, create new path in derived index
         self.upsert_files_at_change(&change_id, from, None)?;
         self.upsert_files_at_change(&change_id, to, Some(&blob_hash))?;
@@ -270,7 +304,10 @@ impl Store {
     fn require_open_stack(&self, stack_id: &str) -> Result<Stack> {
         let s = self.get_stack(stack_id)?;
         if s.status != StackStatus::Open {
-            return Err(VcsError::StackNotOpen(stack_id.to_owned(), s.status.to_string()));
+            return Err(VcsError::StackNotOpen(
+                stack_id.to_owned(),
+                s.status.to_string(),
+            ));
         }
         Ok(s)
     }
@@ -406,7 +443,7 @@ impl Store {
 
         match base_blob {
             Some(h) => self.blobs.get(&h),
-            None    => Err(VcsError::FileNotFound(path.to_owned())),
+            None => Err(VcsError::FileNotFound(path.to_owned())),
         }
     }
 
@@ -461,7 +498,13 @@ impl Store {
             let resolution: Option<Resolution> = resolution_json
                 .map(|s| serde_json::from_str(&s))
                 .transpose()?;
-            out.push(Conflict { conflict_id, view_id, path, candidates, resolution });
+            out.push(Conflict {
+                conflict_id,
+                view_id,
+                path,
+                candidates,
+                resolution,
+            });
         }
         Ok(out)
     }
@@ -511,7 +554,7 @@ impl Store {
     /// Return a simple diff summary between two change IDs.
     pub fn diff(&self, from: &ChangeId, to: &ChangeId) -> Result<Vec<DiffEntry>> {
         let from_snap = self.snapshot_at(from)?;
-        let to_snap   = self.snapshot_at(to)?;
+        let to_snap = self.snapshot_at(to)?;
 
         let mut entries = Vec::new();
         let mut all_paths: std::collections::BTreeSet<&str> =
@@ -520,12 +563,12 @@ impl Store {
 
         for path in all_paths {
             let before = from_snap.get(path).cloned();
-            let after  = to_snap.get(path).cloned();
+            let after = to_snap.get(path).cloned();
             if before != after {
                 entries.push(DiffEntry {
-                    path:        path.to_owned(),
+                    path: path.to_owned(),
                     before_hash: before,
-                    after_hash:  after,
+                    after_hash: after,
                 });
             }
         }
@@ -542,6 +585,42 @@ impl Store {
     /// Fetch raw bytes by hash.
     pub fn get_blob(&self, hash: &str) -> Result<Vec<u8>> {
         self.blobs.get(hash)
+    }
+
+    /// All paths ever tracked as present in this store.
+    pub fn list_tracked_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT path FROM files_at_change
+             WHERE blob_hash IS NOT NULL
+             ORDER BY path",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// The composed file tree state at a given change_id.
+    pub fn snapshot_at(&self, change_id: &str) -> Result<HashMap<String, String>> {
+        if change_id.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut state: HashMap<String, Option<String>> = HashMap::new();
+        let mut current = Some(change_id.to_owned());
+
+        while let Some(cid) = current {
+            let change = self.get_change(&cid)?;
+            let entries = self.file_entries_for_change(&cid)?;
+            for entry in entries {
+                state.entry(entry.path).or_insert(entry.blob_hash);
+            }
+            current = change.parent_id;
+        }
+
+        Ok(state
+            .into_iter()
+            .filter_map(|(path, blob)| blob.map(|hash| (path, hash)))
+            .collect())
     }
 
     // ── Listing helpers (used by serve + remote clients) ───────────────────
@@ -565,11 +644,11 @@ impl Store {
         for row in rows {
             let (sid, aid, base, tip, status_s) = row?;
             out.push(Stack {
-                stack_id:      sid,
-                agent_id:      aid,
+                stack_id: sid,
+                agent_id: aid,
                 base_change_id: base,
-                tip_change_id:  tip,
-                status:        status_s.parse().unwrap_or(StackStatus::Open),
+                tip_change_id: tip,
+                status: status_s.parse().unwrap_or(StackStatus::Open),
             });
         }
         Ok(out)
@@ -597,13 +676,13 @@ impl Store {
         for row in rows {
             let (cid, pid, path, op_s, dh, aid, intent_s, ts) = row?;
             out.push(Change {
-                change_id:  cid,
-                parent_id:  pid,
+                change_id: cid,
+                parent_id: pid,
                 path,
-                op:         op_s.parse()?,
-                diff_hash:  dh,
-                agent_id:   aid,
-                intent:     Intent::from_json(&intent_s)?,
+                op: op_s.parse()?,
+                diff_hash: dh,
+                agent_id: aid,
+                intent: Intent::from_json(&intent_s)?,
                 created_at: ts,
             });
         }
@@ -618,14 +697,16 @@ impl Store {
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(View {
-                view_id:        row.get(0)?,
+                view_id: row.get(0)?,
                 base_change_id: row.get(1)?,
                 applied_stacks: row.get(2)?,
-                state_hash:     row.get(3)?,
+                state_hash: row.get(3)?,
             })
         })?;
         let mut out = Vec::new();
-        for row in rows { out.push(row?); }
+        for row in rows {
+            out.push(row?);
+        }
         Ok(out)
     }
 
@@ -638,10 +719,10 @@ impl Store {
                 [],
                 |row| {
                     Ok(View {
-                        view_id:        row.get(0)?,
+                        view_id: row.get(0)?,
                         base_change_id: row.get(1)?,
                         applied_stacks: row.get(2)?,
-                        state_hash:     row.get(3)?,
+                        state_hash: row.get(3)?,
                     })
                 },
             )
@@ -654,6 +735,66 @@ impl Store {
         &self.root
     }
 
+    /// Build a complete wire bundle for remote push/pull.
+    pub fn export_bundle(&self, project_id: &str) -> Result<HubBundle> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let stacks = self
+            .list_stacks()?
+            .into_iter()
+            .map(|s| HubStack {
+                stack_id: s.stack_id,
+                agent_id: s.agent_id,
+                base_change_id: s.base_change_id,
+                tip_change_id: s.tip_change_id,
+                status: s.status.to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let changes = self
+            .list_changes()?
+            .into_iter()
+            .map(|c| HubChange {
+                change_id: c.change_id,
+                parent_id: c.parent_id,
+                path: c.path,
+                op: c.op.to_string(),
+                diff_hash: c.diff_hash,
+                agent_id: c.agent_id,
+                reason: c.intent.reason,
+                task_ref: c.intent.task_ref,
+                created_at: c.created_at,
+            })
+            .collect::<Vec<_>>();
+
+        let files = self.list_file_entries()?;
+        let mut blob_hashes = BTreeSet::new();
+        for change in &changes {
+            if let Some(hash) = &change.diff_hash {
+                blob_hashes.insert(hash.clone());
+            }
+        }
+        for entry in &files {
+            if let Some(hash) = &entry.blob_hash {
+                blob_hashes.insert(hash.clone());
+            }
+        }
+
+        let mut blobs = HashMap::new();
+        for hash in blob_hashes {
+            let data = self.blobs.get(&hash)?;
+            blobs.insert(hash, B64.encode(data));
+        }
+
+        Ok(HubBundle {
+            project_id: project_id.to_owned(),
+            stacks,
+            changes,
+            files,
+            blobs,
+        })
+    }
+
     /// Ingest a [`HubBundle`] from a remote project.
     ///
     /// Idempotent — uses `INSERT OR IGNORE` so re-pushing the same bundle
@@ -664,7 +805,8 @@ impl Store {
         // 1. Blobs
         let mut blob_count = 0usize;
         for (hash, b64) in &bundle.blobs {
-            let data = B64.decode(b64)
+            let data = B64
+                .decode(b64)
                 .map_err(|e| VcsError::Other(format!("blob {hash} base64: {e}")))?;
             let actual = self.blobs.put(&data)?;
             if actual != *hash {
@@ -681,8 +823,13 @@ impl Store {
                 "INSERT OR IGNORE INTO stacks
                  (stack_id, agent_id, base_change_id, tip_change_id, status)
                  VALUES (?1,?2,?3,?4,?5)",
-                params![s.stack_id, s.agent_id, s.base_change_id,
-                        s.tip_change_id, s.status],
+                params![
+                    s.stack_id,
+                    s.agent_id,
+                    s.base_change_id,
+                    s.tip_change_id,
+                    s.status
+                ],
             )?;
         }
 
@@ -698,9 +845,24 @@ impl Store {
                  (change_id, parent_id, path, op, diff_hash, agent_id, intent, created_at)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
                 params![
-                    c.change_id, c.parent_id, c.path, c.op,
-                    c.diff_hash, c.agent_id, intent_json, c.created_at
+                    c.change_id,
+                    c.parent_id,
+                    c.path,
+                    c.op,
+                    c.diff_hash,
+                    c.agent_id,
+                    intent_json,
+                    c.created_at
                 ],
+            )?;
+        }
+
+        // 4. Derived file-state index rows.
+        for f in &bundle.files {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO files_at_change (change_id, path, blob_hash)
+                 VALUES (?1,?2,?3)",
+                params![f.change_id, f.path, f.blob_hash],
             )?;
         }
 
@@ -712,9 +874,9 @@ impl Store {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiffEntry {
-    pub path:        String,
+    pub path: String,
     pub before_hash: Option<String>,
-    pub after_hash:  Option<String>,
+    pub after_hash: Option<String>,
 }
 
 impl Store {
@@ -726,10 +888,10 @@ impl Store {
                 params![view_id],
                 |row| {
                     Ok(View {
-                        view_id:        row.get(0)?,
+                        view_id: row.get(0)?,
                         base_change_id: row.get(1)?,
                         applied_stacks: row.get(2)?,
-                        state_hash:     row.get(3)?,
+                        state_hash: row.get(3)?,
                     })
                 },
             )
@@ -759,35 +921,18 @@ impl Store {
             .optional()?
             .map(|(cid, pid, path, op_s, dh, aid, intent_s, ts)| {
                 Ok::<Change, VcsError>(Change {
-                    change_id:  cid,
-                    parent_id:  pid,
+                    change_id: cid,
+                    parent_id: pid,
                     path,
-                    op:         op_s.parse()?,
-                    diff_hash:  dh,
-                    agent_id:   aid,
-                    intent:     Intent::from_json(&intent_s)?,
+                    op: op_s.parse()?,
+                    diff_hash: dh,
+                    agent_id: aid,
+                    intent: Intent::from_json(&intent_s)?,
                     created_at: ts,
                 })
             })
             .transpose()?
             .ok_or_else(|| VcsError::ChangeNotFound(change_id.to_owned()))
-    }
-
-    /// The file tree state at a given change_id.
-    fn snapshot_at(&self, change_id: &str) -> Result<HashMap<String, String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT path, blob_hash FROM files_at_change
-             WHERE change_id=?1 AND blob_hash IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![change_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut map = HashMap::new();
-        for r in rows {
-            let (p, h) = r?;
-            map.insert(p, h);
-        }
-        Ok(map)
     }
 
     /// Final file state produced by a single stack (path → blob_hash|None).
@@ -810,19 +955,9 @@ impl Store {
             }
             let change = self.get_change(&cid)?;
 
-            // Fetch every (path, blob_hash) row this change wrote
-            let mut stmt = self.conn.prepare(
-                "SELECT path, blob_hash FROM files_at_change WHERE change_id=?1",
-            )?;
-            let entries = stmt
-                .query_map(params![cid], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-
-            for (path, blob) in entries {
+            for entry in self.file_entries_for_change(&cid)? {
                 // First occurrence while walking tip→base is the latest value
-                out.entry(path).or_insert(blob);
+                out.entry(entry.path).or_insert(entry.blob_hash);
             }
 
             current = change.parent_id.clone();
@@ -861,7 +996,10 @@ impl Store {
 
         for (sid, snap) in stack_snaps {
             for (path, blob) in snap {
-                touched.entry(path.clone()).or_default().push((sid.clone(), blob.clone()));
+                touched
+                    .entry(path.clone())
+                    .or_default()
+                    .push((sid.clone(), blob.clone()));
             }
         }
 
@@ -874,7 +1012,7 @@ impl Store {
                 for (sid, blob) in writers {
                     let tip_cid = self.get_stack(sid)?.tip_change_id.unwrap_or_default();
                     candidates.push(Candidate {
-                        stack_id:  sid.clone(),
+                        stack_id: sid.clone(),
                         change_id: tip_cid,
                         blob_hash: blob.clone(),
                     });
@@ -898,11 +1036,42 @@ impl Store {
             "SELECT path FROM files_at_change WHERE change_id=?1 AND blob_hash IS NOT NULL",
         )?;
         let rows = stmt.query_map(params![change_id], |r| r.get::<_, String>(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn file_entries_for_change(&self, change_id: &str) -> Result<Vec<HubFileEntry>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT change_id, path, blob_hash FROM files_at_change WHERE change_id=?1")?;
+        let rows = stmt.query_map(params![change_id], |r| {
+            Ok(HubFileEntry {
+                change_id: r.get(0)?,
+                path: r.get(1)?,
+                blob_hash: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    fn list_file_entries(&self) -> Result<Vec<HubFileEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT change_id, path, blob_hash FROM files_at_change ORDER BY change_id, path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(HubFileEntry {
+                change_id: r.get(0)?,
+                path: r.get(1)?,
+                blob_hash: r.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }
 
 struct MergedTreeWithCandidates {
-    clean:     HashMap<String, Option<String>>,
+    clean: HashMap<String, Option<String>>,
     conflicts: HashMap<String, Vec<Candidate>>,
 }

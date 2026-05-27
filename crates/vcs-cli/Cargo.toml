@@ -20,3 +20,4 @@ axum          = { version = "0.7", features = ["json"] }
 tower-http    = { version = "0.5", features = ["cors"] }
 tokio         = { version = "1",   features = ["rt-multi-thread", "net", "macros"] }
 base64        = "0.22"
+ureq          = { version = "2", default-features = false, features = ["json"] }

@@ -15,30 +15,40 @@ use std::collections::HashMap;
 pub struct HubBundle {
     /// Human-readable project identifier (e.g. "frontend", "backend-api").
     pub project_id: String,
-    pub stacks:     Vec<HubStack>,
-    pub changes:    Vec<HubChange>,
+    pub stacks: Vec<HubStack>,
+    pub changes: Vec<HubChange>,
+    /// Per-change file index rows. Required to reconstruct snapshots after pull.
+    #[serde(default)]
+    pub files: Vec<HubFileEntry>,
     /// blob_hash → base64-encoded content
     pub blobs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubStack {
-    pub stack_id:       String,
-    pub agent_id:       String,
+    pub stack_id: String,
+    pub agent_id: String,
     pub base_change_id: Option<String>,
-    pub tip_change_id:  Option<String>,
-    pub status:         String,
+    pub tip_change_id: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubChange {
-    pub change_id:  String,
-    pub parent_id:  Option<String>,
-    pub path:       String,
-    pub op:         String,
-    pub diff_hash:  Option<String>,
-    pub agent_id:   String,
-    pub reason:     String,
-    pub task_ref:   Option<String>,
+    pub change_id: String,
+    pub parent_id: Option<String>,
+    pub path: String,
+    pub op: String,
+    pub diff_hash: Option<String>,
+    pub agent_id: String,
+    pub reason: String,
+    pub task_ref: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubFileEntry {
+    pub change_id: String,
+    pub path: String,
+    pub blob_hash: Option<String>,
 }
