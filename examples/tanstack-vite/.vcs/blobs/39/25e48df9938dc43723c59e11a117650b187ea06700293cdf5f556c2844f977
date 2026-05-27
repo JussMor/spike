@@ -1,0 +1,6 @@
+import { useQuery } from '@tanstack/react-query'
+
+export function Feature0() {
+  const { data } = useQuery({ queryKey: ['feature', 0], queryFn: async () => 0 })
+  return <div>Feature 0: {data}</div>
+}

@@ -1,0 +1,6 @@
+/target/
+examples/node-demo/node_modules/
+examples/tanstack-vite/node_modules/
+**/*.tmp
+.vcs-spike/
+# Don't ignore .vcs/ — it's like .git/, tracked intentionally
