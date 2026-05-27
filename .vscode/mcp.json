@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "vcs": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/jussmor/Developer/everfaz/spike/packages/vcs-mcp/server.js"
+      ],
+      "env": {
+        "VCS_BIN": "/Users/jussmor/Developer/everfaz/spike/target/release/vcs"
+      }
+    }
+  }
+}

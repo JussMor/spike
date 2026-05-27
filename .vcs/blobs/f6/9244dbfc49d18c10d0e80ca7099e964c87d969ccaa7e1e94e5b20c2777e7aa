@@ -48,17 +48,16 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 | `vcs_stack_open` | Open an agent stack (start of every task) |
 | `vcs_stack_close` | Close when done |
 | `vcs_stack_abandon` | Abandon on error |
-| `vcs_edit_from_disk` | Read disk as base, store the touched file in `.vcs`, never write disk |
-| `vcs_edit` | Record a direct full-content edit in `.vcs` |
+| `vcs_edit` | Record a file edit (replaces write_file) |
 | `vcs_delete` | Record a file deletion |
 | `vcs_rename` | Record a file rename/move |
 | `vcs_view_open` | Merge multiple stacks into a view |
 | `vcs_view_files` | List files in a merged view |
-| `vcs_view_read` | Read file content from a view without writing a worktree |
 | `vcs_view_conflicts` | Detect conflicts between agents |
 | `vcs_resolve` | Resolve a conflict |
 | `vcs_log` | Show change history for a stack |
 | `vcs_history` | Show full store history across stacks |
+| `vcs_checkout` | Materialize a change into a worktree |
 | `vcs_remote_add` | Configure a named remote hub |
 | `vcs_push` | Push structured agent history to a hub |
 | `vcs_pull` | Pull structured agent history from a hub |
@@ -70,23 +69,8 @@ Once the MCP server is connected, Claude follows this workflow automatically
 
 ```
 Before:  Claude writes files directly → no history, no conflict detection
-After:   Claude uses vcs_edit_from_disk + vcs_view_read → full history, conflict-aware, intent-documented
+After:   Claude uses vcs_edit → full history, conflict-aware, intent-documented
 ```
-
-For VS Code, use `.vscode/mcp.json` with the same server command. Pass a
-project directory to `vcs_init`; the MCP server normalizes it to
-`<project>/.vcs`, matching the CLI.
-
-Agents should inspect historical content through views:
-
-```
-vcs_view_open({ base_change_id: "<change_id>", stack_ids: [] })
-vcs_view_files({ view_id })
-vcs_view_read({ view_id, path: "src/file.ts" })
-```
-
-The MCP server intentionally does not expose checkout/materialization tools.
-Agents inspect history through views and write changes through `vcs_edit_from_disk`.
 
 ## Custom slash commands
 

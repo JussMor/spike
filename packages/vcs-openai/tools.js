@@ -42,8 +42,8 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { writeFileSync, existsSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
 // ── Function schemas (OpenAI format) ──────────────────────────────────────
@@ -134,7 +134,7 @@ export const vcsTools = [
     function: {
       name: 'vcs_edit',
       description:
-        'Record a file edit in vcs. Use this instead of writing files directly. ' +
+        'Record a full-content edit directly in vcs. Prefer vcs_edit_from_disk for legacy code. ' +
         'The reason field is required — explain WHY you are making this change.',
       parameters: {
         type: 'object',
@@ -145,6 +145,28 @@ export const vcsTools = [
           content:  { type: 'string', description: 'Full new file content.' },
           reason:   { type: 'string', description: 'Why you are making this change.' },
           task_ref: { type: 'string', description: 'Optional issue/task reference.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'vcs_edit_from_disk',
+      description:
+        'Agent-safe edit for legacy projects. Reads the current file from disk as the base, ' +
+        'seeds that base into the stack if this stack has not touched the file yet, then records ' +
+        'the new content in .vcs. It never writes the project file to disk.',
+      parameters: {
+        type: 'object',
+        required: ['stack_id', 'path', 'content', 'reason'],
+        properties: {
+          stack_id: { type: 'string' },
+          path:     { type: 'string', description: 'File path relative to project root.' },
+          content:  { type: 'string', description: 'Full new file content after the edit.' },
+          reason:   { type: 'string', description: 'Why you are making this change.' },
+          task_ref: { type: 'string', description: 'Optional issue/task reference.' },
+          root_path: { type: 'string', description: 'Project root. Defaults to process CWD.' },
         },
       },
     },
@@ -220,6 +242,23 @@ export const vcsTools = [
   {
     type: 'function',
     function: {
+      name: 'vcs_view_read',
+      description:
+        'Read one file from a vcs view without writing it to disk. ' +
+        'Use this for agent history navigation and rollback inspection.',
+      parameters: {
+        type: 'object',
+        required: ['view_id', 'path'],
+        properties: {
+          view_id: { type: 'string' },
+          path: { type: 'string' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'vcs_resolve',
       description: 'Resolve a conflict. Only call when explicitly told to.',
       parameters: {
@@ -274,26 +313,6 @@ export const vcsTools = [
       parameters: {
         type: 'object',
         properties: {},
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'vcs_checkout',
-      description:
-        'Materialise the tracked file tree at a historical change ID into a directory. ' +
-        'Use this to replay or inspect what an agent produced at any point in history.',
-      parameters: {
-        type: 'object',
-        required: ['change_id'],
-        properties: {
-          change_id: { type: 'string', description: 'Change ID to materialise (from vcs_log or vcs_history).' },
-          worktree: {
-            type: 'string',
-            description: 'Directory to write files into. Defaults to current directory.',
-          },
-        },
       },
     },
   },
@@ -450,9 +469,9 @@ export const vcsSystemPrompt = `You are a coding agent with access to vcs-spike 
 0. ALWAYS register yourself first: vcs_session_open({ agent_id: "<your-id>" }) → save session_id
 1. Check the store: vcs_status() — if open_stacks is non-empty, call vcs_overview() and report
 2. Open a stack before any edits: vcs_stack_open({ agent_id, session_id })
-3. Use vcs_edit instead of writing files directly — it records your intent
-4. reason is REQUIRED on every vcs_edit. Be precise about why, not what.
-5. After EVERY vcs_edit call vcs_touching({ path, stack_id }) — if other_stacks is non-empty,
+3. Use vcs_edit_from_disk instead of writing files directly — it reads disk as base and records your intent in .vcs
+4. reason is REQUIRED on every edit. Be precise about why, not what.
+5. After EVERY edit call vcs_touching({ path, stack_id }) — if other_stacks is non-empty,
    warn the user: "⚡ <agent> is also editing <path> — conflict likely on merge"
 6. Close everything when done: vcs_stack_close({ stack_id }) + vcs_session_close({ session_id })
 7. On error or cancellation: vcs_stack_abandon({ stack_id }) + vcs_session_close({ session_id })
@@ -512,6 +531,43 @@ function tmp(content) {
   return p
 }
 
+function projectRelativePath(path) {
+  if (!path || path.startsWith('/') || path.includes('\0')) {
+    throw new Error(`vcs path must be relative to the project root: ${path}`)
+  }
+  const normal = path.replaceAll('\\', '/').split('/').filter(Boolean).join('/')
+  if (!normal || normal === '.' || normal.split('/').includes('..')) {
+    throw new Error(`vcs path must stay inside the project root: ${path}`)
+  }
+  return normal
+}
+
+function diskPathFor(rootPath, relPath) {
+  const root = resolve(rootPath ?? process.cwd())
+  const absolute = resolve(root, relPath)
+  if (!absolute.startsWith(root + '/') && absolute !== root) {
+    throw new Error(`refusing to read outside project root: ${relPath}`)
+  }
+  return absolute
+}
+
+function runEdit(stackId, path, content, reason, taskRef) {
+  const t = tmp(content)
+  try {
+    const a = ['edit', stackId, path, '--content-file', t, '--reason', reason]
+    if (taskRef) a.push('--task-ref', taskRef)
+    return run(a)
+  } finally {
+    rmSync(t, { force: true })
+  }
+}
+
+function stackTouchesPath(stackId, path) {
+  const view = run(['view', 'open', '--base', '', '--stacks', stackId])
+  const files = run(['view', 'ls', view.view_id])?.files ?? []
+  return files.includes(path)
+}
+
 /**
  * Execute a vcs tool call.
  * Drop this into your OpenAI tool-call dispatch loop.
@@ -541,11 +597,42 @@ export async function handleVcsTool(name, args = {}) {
     case 'vcs_stack_abandon':
       return run(['stack', 'abandon', args.stack_id])
     case 'vcs_edit': {
-      const t = tmp(args.content); try {
-        const a = ['edit', args.stack_id, args.path, '--content-file', t, '--reason', args.reason]
-        if (args.task_ref) a.push('--task-ref', args.task_ref)
-        return run(a)
-      } finally { rmSync(t, { force: true }) }
+      return runEdit(args.stack_id, args.path, args.content, args.reason, args.task_ref)
+    }
+    case 'vcs_edit_from_disk': {
+      const relPath = projectRelativePath(args.path)
+      const alreadyTouched = stackTouchesPath(args.stack_id, relPath)
+      let seedChange = null
+      let diskBase = null
+      const diskPath = diskPathFor(args.root_path, relPath)
+
+      if (!alreadyTouched && existsSync(diskPath)) {
+        diskBase = readFileSync(diskPath, 'utf8')
+        if (diskBase === args.content) {
+          return {
+            ok: true,
+            no_change: true,
+            path: relPath,
+            base_source: 'disk',
+            message: 'content equals disk base; no vcs change recorded',
+          }
+        }
+        seedChange = runEdit(
+          args.stack_id,
+          relPath,
+          diskBase,
+          `seed disk base for ${relPath}`,
+          args.task_ref,
+        )
+      }
+
+      const result = runEdit(args.stack_id, relPath, args.content, args.reason, args.task_ref)
+      return {
+        ...result,
+        path: relPath,
+        base_source: alreadyTouched ? 'stack' : (diskBase === null ? 'new-file' : 'disk'),
+        seeded_base_change_id: seedChange?.change_id ?? null,
+      }
     }
     case 'vcs_delete': {
       const a = ['delete', args.stack_id, args.path, '--reason', args.reason]
@@ -557,6 +644,8 @@ export async function handleVcsTool(name, args = {}) {
       return { conflicts: run(['view', 'conflicts', args.view_id]) ?? [] }
     case 'vcs_view_files':
       return { files: run(['view', 'ls', args.view_id])?.files ?? [] }
+    case 'vcs_view_read':
+      return run(['view', 'read', args.view_id, args.path])
     case 'vcs_resolve': {
       if (args.pick_stack_id) return run(['view', 'resolve', args.conflict_id, '--pick', args.pick_stack_id])
       if (args.merge_content) {
@@ -578,11 +667,6 @@ export async function handleVcsTool(name, args = {}) {
     }
     case 'vcs_history':
       return { changes: run(['history']) ?? [] }
-    case 'vcs_checkout': {
-      const a = ['checkout', args.change_id]
-      if (args.worktree) a.push('--worktree', args.worktree)
-      return run(a)
-    }
     case 'vcs_remote_add':
       return run(['remote', 'add', args.name, args.url])
     case 'vcs_push': {

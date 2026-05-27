@@ -7,7 +7,8 @@ You have vcs tools available via MCP. Use them for every file modification.
 
 ```
 ❌  Write("src/foo.ts", content)         ← writes to disk, invisible to other agents
-✅  vcs_edit(stackId, "src/foo.ts", content, { reason: "why" })  ← tracked
+✅  vcs_edit_from_disk({ stack_id, path: "src/foo.ts", content, reason: "why" })
+    ← reads disk as base, stores touched file in .vcs, never writes disk
 ```
 
 ## Your workflow on every task (multi-session aware)
@@ -33,7 +34,7 @@ You have vcs tools available via MCP. Use them for every file modification.
    → stack auto-linked to the session
 
 3. For each file you create or modify:
-   vcs_edit({ stack_id, path, content, reason: "precise reason" })
+   vcs_edit_from_disk({ stack_id, path, content, reason: "precise reason" })
    → after EACH edit, check vcs_touching({ path, stack_id })
    → if other_stacks is non-empty, IMMEDIATELY tell the user:
      "⚡ <other-agent> is also editing <path> — conflict likely on merge"
@@ -75,6 +76,21 @@ Conflicts are data. The human or orchestrator decides.
 
 → Report to user. Do NOT call vcs_resolve without explicit instruction.
 ```
+
+## History Navigation
+
+Do not create checkout directories just to inspect old state. Disk materialization is a
+human/export operation. For agent rollback analysis, open a view at the target change and
+read files from the store:
+
+```js
+const { view_id } = await vcs_view_open({ base_change_id: changeId, stack_ids: [] })
+const { files } = await vcs_view_files({ view_id })
+const file = await vcs_view_read({ view_id, path: "src/file.ts" })
+```
+
+Checkout/materialization is not exposed through the agent MCP. If the user asks
+for an export, tell them it must be done explicitly through the CLI.
 
 ## Multi-agent tasks
 

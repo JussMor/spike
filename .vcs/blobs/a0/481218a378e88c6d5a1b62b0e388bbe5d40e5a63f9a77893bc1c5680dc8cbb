@@ -4,7 +4,7 @@ Ready-made OpenAI function definitions and hub API schemas for vcs-spike.
 
 This is not the Codex plugin surface. Codex should use the local MCP server in
 `packages/vcs-mcp` plus `skill/SKILL.md`, because Codex needs filesystem-local
-tools that can open stacks, record edits, read store-backed views, and sync stores.
+tools that can open stacks, record edits, checkout changes, and sync stores.
 The `ai-plugin.json` file is a legacy/custom-GPT action manifest for HTTP hub
 access.
 
@@ -69,13 +69,11 @@ Points to the hub's OpenAPI spec. Useful for custom GPT actions.
 | `vcs_stack_open` | Start tracking a task |
 | `vcs_stack_close` | Finish a task |
 | `vcs_stack_abandon` | Cancel a task |
-| `vcs_edit_from_disk` | Read disk as base, store touched file in `.vcs`, never write disk |
-| `vcs_edit` | Record a direct full-content edit in `.vcs` |
+| `vcs_edit` | Record a file edit |
 | `vcs_delete` | Record a file deletion |
 | `vcs_view_open` | Merge stacks into a view |
 | `vcs_view_conflicts` | Check for conflicts |
 | `vcs_view_files` | List files in view |
-| `vcs_view_read` | Read file content from a view without writing to disk |
 | `vcs_resolve` | Resolve a conflict |
 | `vcs_log` | Show change history |
 
