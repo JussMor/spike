@@ -30,7 +30,12 @@ vcs-spike/
 │   │   └── e2e/                Playwright tests — all selectors via data-testid
 │   └── multi-project-demo/     Two separate codebases → one hub → cross-project conflict
 ├── packages/
-│   └── vcs-npm/                npm package (npm install -g vcs-spike)
+│   ├── vcs-npm/                npm package  (npm install -g vcs-spike)
+│   ├── vcs-mcp/                Claude Code MCP server — vcs as native Claude tools
+│   └── vcs-openai/             OpenAI Codex functions + OpenAPI spec + plugin manifest
+├── .mcp.json                   Claude Code project config — auto-loads vcs MCP server
+├── CLAUDE.md                   Claude Code instructions — how Claude uses vcs
+├── .claude/commands/           Custom slash commands: /vcs-start /vcs-done /vcs-abort
 ├── docs/
 │   └── cicd-architecture.md   Pipeline design, conflict gate, e2e strategy
 ├── install.sh                  One-command curl installer
@@ -257,6 +262,83 @@ const conflicts = await hub.viewConflicts(viewId)
 
 ---
 
+## AI integrations
+
+### Claude Code (MCP server)
+
+The `.mcp.json` at the repo root tells Claude Code to auto-load the vcs MCP server.
+Once connected, Claude has these tools natively — no CLI calls needed:
+
+```
+vcs_init        vcs_stack_open   vcs_stack_close  vcs_stack_abandon
+vcs_edit        vcs_delete       vcs_rename
+vcs_view_open   vcs_view_files   vcs_view_conflicts   vcs_resolve
+vcs_log
+```
+
+**What changes for Claude:**
+```
+Before:  Write("src/foo.ts", content)          ← direct write, invisible to other agents
+After:   vcs_edit(stackId, "src/foo.ts", ...)  ← tracked, intent-documented, conflict-aware
+```
+
+Custom slash commands available in Claude Code:
+```
+/vcs-start <task>   open a stack, begin tracking
+/vcs-done           close stack, show summary
+/vcs-abort          abandon stack on error
+/vcs-status         show what's tracked so far
+```
+
+**For a new project:**
+
+```json
+// .mcp.json
+{
+  "mcpServers": {
+    "vcs": {
+      "command": "npx",
+      "args": ["vcs-mcp"],
+      "env": { "VCS_BIN": "/usr/local/bin/vcs" }
+    }
+  }
+}
+```
+
+See `packages/vcs-mcp/README.md` and `CLAUDE.md` for full setup.
+
+---
+
+### OpenAI Codex / GPT-4o
+
+Drop-in function definitions for the Chat Completions and Assistants APIs:
+
+```js
+import { vcsTools, vcsSystemPrompt, handleVcsTool } from 'vcs-openai'
+
+const response = await openai.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [
+    { role: 'system', content: vcsSystemPrompt },
+    { role: 'user',   content: 'Add a LoginForm component' },
+  ],
+  tools: vcsTools,   // ← all 12 vcs functions, with JSON schemas
+})
+
+// Dispatch tool calls back to vcs binary:
+for (const call of response.choices[0].message.tool_calls ?? []) {
+  const result = await handleVcsTool(call.function.name, JSON.parse(call.function.arguments))
+}
+```
+
+Also includes:
+- `openapi.yaml` — full OpenAPI 3.1 spec for the `vcs serve` hub API
+- `ai-plugin.json` — ChatGPT plugin manifest (points at `GET /openapi.yaml`)
+
+See `packages/vcs-openai/README.md` for full docs.
+
+---
+
 ## The data-testid contract
 
 Every component an agent writes must have `data-testid` on interactive elements. Every Playwright test must select via `getByTestId()` only. This is the contract that survives agent refactors:
@@ -330,6 +412,10 @@ See `docs/cicd-architecture.md` for the full GitHub Actions workflow.
 | Multi-project hub demo | ✅ built |
 | Playwright e2e with data-testid | ✅ built |
 | GitHub Actions CI (4-job pipeline) | ✅ built |
+| Claude Code MCP server (`vcs-mcp`) | ✅ built |
+| Claude Code slash commands | ✅ built |
+| OpenAI function definitions (`vcs-openai`) | ✅ built |
+| OpenAPI 3.1 spec for hub API | ✅ built |
 | Filesystem materializer (`vcs checkout`) | 🔜 post-spike |
 | Filesystem watcher (human dev UX) | 🔜 post-spike |
 | Conflict resolution UI | 🔜 post-spike |

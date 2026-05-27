@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "vcs": {
+      "command": "node",
+      "args": ["packages/vcs-mcp/server.js"],
+      "env": {
+        "VCS_BIN": "./target/release/vcs"
+      }
+    }
+  }
+}
