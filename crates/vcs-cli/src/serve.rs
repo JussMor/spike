@@ -142,6 +142,11 @@ async fn get_changes(State(db): State<Db>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(store.list_changes()?)?))
 }
 
+async fn get_edits(State(db): State<Db>) -> ApiResult<Value> {
+    let store = db.lock().unwrap();
+    Ok(Json(serde_json::to_value(store.list_edit_metadata()?)?))
+}
+
 async fn get_stacks(State(db): State<Db>) -> ApiResult<Value> {
     let store = db.lock().unwrap();
     Ok(Json(serde_json::to_value(store.list_stacks()?)?))
@@ -300,6 +305,7 @@ pub async fn run(store: Store, port: u16) -> Result<()> {
         // ── read ───────────────────────────────────────────────────────────
         .route("/api/vcs/status", get(get_status))
         .route("/api/vcs/changes", get(get_changes))
+        .route("/api/vcs/edits", get(get_edits))
         .route("/api/vcs/stacks", get(get_stacks))
         .route("/api/vcs/views", get(get_views))
         .route("/api/vcs/active-view", get(get_active_view))

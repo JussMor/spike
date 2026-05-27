@@ -20,6 +20,9 @@ pub struct HubBundle {
     /// Per-change file index rows. Required to reconstruct snapshots after pull.
     #[serde(default)]
     pub files: Vec<HubFileEntry>,
+    /// Structured edit metadata for efficient agent review and sync.
+    #[serde(default)]
+    pub edits: Vec<HubEditMetadata>,
     /// blob_hash → base64-encoded content
     pub blobs: HashMap<String, String>,
 }
@@ -51,4 +54,18 @@ pub struct HubFileEntry {
     pub change_id: String,
     pub path: String,
     pub blob_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubEditMetadata {
+    pub change_id: String,
+    pub path: String,
+    pub base_blob_hash: Option<String>,
+    pub result_blob_hash: Option<String>,
+    pub patch_blob_hash: Option<String>,
+    pub edit_kind: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
+    pub inserted_lines: u32,
+    pub deleted_lines: u32,
 }

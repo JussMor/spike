@@ -119,6 +119,15 @@ Orchestrator
 
 No agent coordinates with another agent. The orchestrator sees everything after.
 
+### Efficient edit records
+
+`vcs edit` stores two layers of data:
+
+1. A result blob for deterministic checkout and view reads.
+2. A compact structured patch blob plus `edit_metadata` row describing the base blob, result blob, edit kind, and changed line range.
+
+That keeps materialization reliable while giving agents a small, inspectable operation for review, sync, and conflict reasoning. When two stacks edit different line ranges of the same base blob, `vcs view open` can auto-resolve that path by applying both patches and storing the merged result as a resolved conflict record.
+
 ---
 
 ## Examples
@@ -220,6 +229,7 @@ vcs hub listening on http://0.0.0.0:7474
 ```
 GET  /api/vcs/status
 GET  /api/vcs/changes
+GET  /api/vcs/edits
 GET  /api/vcs/stacks
 GET  /api/vcs/views
 GET  /api/vcs/active-view
@@ -253,7 +263,7 @@ vcs push hub --project-id frontend
 vcs pull hub
 ```
 
-Bundles include stacks, changes, per-change file-state rows, and content-addressed blobs, so pulled stores can open views, detect conflicts, and checkout historical states without needing the original project directory.
+Bundles include stacks, changes, structured edit metadata, per-change file-state rows, and content-addressed blobs, so pulled stores can open views, detect conflicts, inspect compact edit operations, and checkout historical states without needing the original project directory.
 
 ### History checkout
 
