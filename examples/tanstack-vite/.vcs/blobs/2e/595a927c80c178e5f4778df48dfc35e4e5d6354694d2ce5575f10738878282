@@ -1,0 +1,19 @@
+import { useVcsAllChanges } from '../hooks/useVcs'
+
+/** ChangeHistory — added by feature-bot agent, tracked by vcs */
+export function ChangeHistory() {
+  const { data } = useVcsAllChanges()
+  if (!data) return null
+  return (
+    <div className="change-history">
+      <h3>Change History ({data.length})</h3>
+      <ul>
+        {data.slice(-5).map(c => (
+          <li key={c.change_id}>
+            <code>{c.change_id.slice(0, 8)}</code> {c.op} {c.path}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}

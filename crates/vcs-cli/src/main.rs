@@ -9,9 +9,36 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use vcs_core::{Intent, Resolution, Store};
 
-// ── Store path resolution ──────────────────────────────────────────────────
+// ── Store path resolution (git-like) ──────────────────────────────────────
+//
+// Priority order (same idea as git):
+//   1. --store <path> flag
+//   2. VCS_STORE_PATH env var
+//   3. Walk CWD upward looking for a .vcs/ directory  ← like git finds .git/
+//   4. ~/.vcs-spike/  (global fallback)
+
+fn find_local_store() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let mut dir = cwd.as_path();
+    loop {
+        let candidate = dir.join(".vcs");
+        if candidate.join("vcs.db").exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+}
 
 fn default_store_path() -> PathBuf {
+    // Try local .vcs/ first
+    if let Some(local) = find_local_store() {
+        return local;
+    }
+    // Then env var
+    if let Ok(p) = std::env::var("VCS_STORE_PATH") {
+        return PathBuf::from(p);
+    }
+    // Global fallback
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".into());
@@ -19,7 +46,18 @@ fn default_store_path() -> PathBuf {
 }
 
 fn store_path(override_path: Option<&PathBuf>) -> PathBuf {
-    override_path.cloned().unwrap_or_else(default_store_path)
+    if let Some(p) = override_path {
+        return p.clone();
+    }
+    if let Ok(p) = std::env::var("VCS_STORE_PATH") {
+        return PathBuf::from(p);
+    }
+    // Walk up looking for .vcs/
+    if let Some(local) = find_local_store() {
+        return local;
+    }
+    // Global fallback
+    default_store_path()
 }
 
 // ── Output helpers ─────────────────────────────────────────────────────────
@@ -182,7 +220,15 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let json = cli.json;
-    let sp = store_path(cli.store.as_ref());
+
+    // For `init`, if no --store flag given, default to .vcs/ in CWD (git-like)
+    let sp = if matches!(cli.cmd, Cmd::Init) && cli.store.is_none()
+        && std::env::var("VCS_STORE_PATH").is_err()
+    {
+        std::env::current_dir()?.join(".vcs")
+    } else {
+        store_path(cli.store.as_ref())
+    };
 
     match cli.cmd {
         Cmd::Init => {
