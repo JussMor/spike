@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { sessionOverlay } from './plugins/session-overlay.js'
+import { sessionOverlay } from 'vcs-overlay/plugin'
 import path from 'node:path'
 import os from 'node:os'
 

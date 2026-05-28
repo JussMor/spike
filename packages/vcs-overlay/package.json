@@ -1,0 +1,22 @@
+{
+  "name": "vcs-overlay",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Vite plugin + CLI for per-agent file overlays with content-addressed history",
+  "bin": {
+    "vcs-overlay": "./cli.mjs"
+  },
+  "exports": {
+    "./plugin": {
+      "types": "./plugin.d.ts",
+      "default": "./plugin.js"
+    },
+    "./store": {
+      "types": "./store.d.ts",
+      "default": "./store.mjs"
+    }
+  },
+  "peerDependencies": {
+    "vite": ">=5"
+  }
+}

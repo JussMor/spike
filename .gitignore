@@ -1,3 +1,4 @@
-examples/vite-overlay/node_modules/
-examples/vite-overlay/dist/
+**/node_modules/
+**/dist/
 **/*.tmp
+package-lock.json
