@@ -8,8 +8,8 @@
  *   - Shares the same source tree  →  no copying, no branches, no worktrees
  *
  * Usage:
- *   node scripts/start-agents.mjs
- *   VCS_AGENTS=agent-a,agent-b node scripts/start-agents.mjs
+ *   node scripts/start-agents.mjs           # starts 2 sessions
+ *   VCS_N=3 node scripts/start-agents.mjs   # starts 3 sessions
  *
  * To apply a change for a specific agent:
  *   echo '<h1>Hello from agent-a</h1>' > /tmp/vcs-sessions/agent-a/src/greeting.tsx
@@ -22,16 +22,15 @@ import { sessionOverlay } from '../plugins/session-overlay.js'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-// ── Agent list ──────────────────────────────────────────────────────────────
+// ── Session list — auto-generated IDs, no pre-registration needed ────────────
 
-const agentIds = (process.env.VCS_AGENTS ?? 'agent-dashboard,agent-auth')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean)
+const n = parseInt(process.env.VCS_N ?? '2', 10)
+const agentIds = Array.from({ length: n }, () => `s${crypto.randomUUID().slice(0, 6)}`)
 
 // ── Launcher ────────────────────────────────────────────────────────────────
 
