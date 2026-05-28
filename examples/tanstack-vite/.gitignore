@@ -1,9 +1,5 @@
-# vcs store — commit this to share tracked state with the team
-# (same convention as committing .git — don't ignore it)
-# .vcs/
-
-# vcs temp files
-.vcs/*.tmp
+# vcs store — local agent store, like .git/ — never commit
+.vcs/
 
 # Logs
 logs

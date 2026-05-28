@@ -1,2 +1,3 @@
 node_modules/
-.vcs/*.tmp
+# vcs store — local agent store, like .git/ — never commit
+.vcs/
