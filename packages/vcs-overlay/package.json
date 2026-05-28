@@ -3,6 +3,22 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Vite plugin + CLI for per-agent file overlays with content-addressed history",
+  "license": "MIT",
+  "homepage": "https://github.com/JussMor/spike/tree/main/packages/vcs-overlay",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JussMor/spike.git",
+    "directory": "packages/vcs-overlay"
+  },
+  "keywords": ["vite", "vite-plugin", "overlay", "multi-agent", "hmr", "session"],
+  "files": [
+    "cli.mjs",
+    "plugin.js",
+    "plugin.d.ts",
+    "store.mjs",
+    "store.d.ts",
+    "README.md"
+  ],
   "bin": {
     "vcs-overlay": "./cli.mjs"
   },
