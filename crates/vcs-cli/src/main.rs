@@ -1228,9 +1228,9 @@ fn scaffold_project(dir: &Path) -> Result<()> {
             }
         }))?;
         std::fs::write(&mcp_path, mcp + "\n")?;
-        println!("  wrote  .mcp.json");
+        eprintln!("  wrote  .mcp.json");
     } else {
-        println!("  exists .mcp.json (unchanged)");
+        eprintln!("  exists .mcp.json (unchanged)");
     }
 
     // .gitignore — append .vcs/ if not already present
@@ -1244,18 +1244,18 @@ fn scaffold_project(dir: &Path) -> Result<()> {
         }
         writeln!(f, "\n# vcs local store — not committed (like .git/)")?;
         writeln!(f, ".vcs/")?;
-        println!("  wrote  .gitignore (+.vcs/)");
+        eprintln!("  wrote  .gitignore (+.vcs/)");
     } else {
-        println!("  exists .gitignore (.vcs/ already present)");
+        eprintln!("  exists .gitignore (.vcs/ already present)");
     }
 
     // CLAUDE.md — agent workflow instructions
     let claude_path = dir.join("CLAUDE.md");
     if !claude_path.exists() {
         std::fs::write(&claude_path, CLAUDE_MD_TEMPLATE)?;
-        println!("  wrote  CLAUDE.md");
+        eprintln!("  wrote  CLAUDE.md");
     } else {
-        println!("  exists CLAUDE.md (unchanged — edit manually if needed)");
+        eprintln!("  exists CLAUDE.md (unchanged — edit manually if needed)");
     }
 
     // vcs.run.json — multi-agent session manifest
@@ -1270,14 +1270,14 @@ fn scaffold_project(dir: &Path) -> Result<()> {
             "dashboard_port": 4000
         }))?;
         std::fs::write(&run_path, run + "\n")?;
-        println!("  wrote  vcs.run.json");
+        eprintln!("  wrote  vcs.run.json");
     } else {
-        println!("  exists vcs.run.json (unchanged)");
+        eprintln!("  exists vcs.run.json (unchanged)");
     }
 
-    println!("\nNext steps:");
-    println!("  Open this project in Claude Code — vcs tools load automatically.");
-    println!("  Multiple agents? node vcs-run.js  (starts servers, wires stack IDs)");
+    eprintln!("\nNext steps:");
+    eprintln!("  Open this project in Claude Code — vcs tools load automatically.");
+    eprintln!("  Multiple agents? node vcs-run.js  (starts servers, wires stack IDs)");
     Ok(())
 }
 
