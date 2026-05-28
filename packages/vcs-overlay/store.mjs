@@ -1,5 +1,5 @@
 /**
- * overlay-store.mjs — content-addressed store for agent overlay snapshots.
+ * store.mjs — content-addressed store for agent overlay snapshots.
  *
  * Layout:
  *   <projectRoot>/.vcs-overlay/

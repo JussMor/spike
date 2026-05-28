@@ -1,0 +1,16 @@
+{
+  "name": "spike",
+  "owner": {
+    "name": "JussMor"
+  },
+  "metadata": {
+    "description": "Agent integrations for vcs-overlay — per-agent file overlays for multi-session Vite development."
+  },
+  "plugins": [
+    {
+      "name": "vcs-overlay",
+      "source": "./integrations/claude-code",
+      "description": "Teaches Claude Code to work with vcs-overlay: per-agent file overlays with content-addressed history for multi-session Vite development."
+    }
+  ]
+}

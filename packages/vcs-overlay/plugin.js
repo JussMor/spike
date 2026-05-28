@@ -1,8 +1,8 @@
 /**
- * session-overlay.js — Vite plugin for per-agent file overlays.
+ * plugin.js — Vite plugin for per-agent file overlays.
  *
  * How it works:
- *   1. Each agent session gets an `overlayDir` (e.g. /tmp/vcs-sessions/agent-auth/).
+ *   1. Each agent session gets an `overlayDir` (e.g. /tmp/vcs-sessions/s1234/).
  *   2. The plugin's `load()` hook fires for every module request.
  *      If overlayDir/relPath exists → serve that instead of the real disk file.
  *      Otherwise → Vite loads normally (no change to the source tree).

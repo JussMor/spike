@@ -1,0 +1,7 @@
+{
+  "name": "spike",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
+}

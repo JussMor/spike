@@ -51,15 +51,43 @@ cp examples/vite-overlay/src/App.tsx /tmp/vcs-sessions/agent-dashboard/src/App.t
 
 To remove an overlay, delete the file — the session falls back to disk.
 
+## Tracking & CLI
+
+Snapshots, diffs, promotion, and rollback are handled by the `vcs-overlay`
+CLI (content-addressed store in `.vcs-overlay/`, zero npm deps):
+
+```bash
+npx vcs-overlay status                       # sessions, file counts, collisions
+npx vcs-overlay diff <id>                     # unified diff vs source
+npx vcs-overlay snapshot <id> --reason "msg"  # content-addressed checkpoint
+npx vcs-overlay promote <id>                  # land overlay onto the source tree
+npx vcs-overlay checkout <id> <commit-id>     # restore overlay from a snapshot
+```
+
+## Agent integrations
+
+Drop-in skills so coding agents know to edit through their overlay (not the
+shared source tree) and use the CLI workflow:
+
+- **Claude Code** — `integrations/claude-code/` (installable plugin):
+  ```
+  /plugin marketplace add JussMor/spike
+  /plugin install vcs-overlay@spike
+  ```
+- **OpenAI Codex** — `integrations/codex/AGENTS.md` (copy into your project root).
+
 ## Repository layout
 
 ```
-examples/vite-overlay/
-├── plugins/
-│   └── session-overlay.js    Vite plugin — load() hook + HMR + SSE endpoint
-├── scripts/
-│   └── start-agents.mjs      Portless multi-session launcher
-└── src/
-    ├── App.tsx
-    └── OverlayPanel.tsx      Live overlay file list via SSE
+packages/vcs-overlay/         npm package: Vite plugin + content-addressed store + CLI
+├── plugin.js                 sessionOverlay() — load() hook + HMR + SSE endpoint
+├── store.mjs                 content-addressed snapshot store
+└── cli.mjs                   vcs-overlay binary
+
+examples/vite-overlay/        demo app
+└── scripts/start-agents.mjs  portless multi-session launcher
+
+integrations/
+├── claude-code/              Claude Code plugin (skill + /status command)
+└── codex/                    OpenAI Codex AGENTS.md instructions
 ```

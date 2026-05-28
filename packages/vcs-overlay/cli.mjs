@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * vcs-overlay.mjs — CLI for the content-addressed overlay store.
+ * cli.mjs — vcs-overlay CLI.
  *
- * Usage:
- *   node scripts/vcs-overlay.mjs <command> [args] [--json]
+ * Run from any project root:
+ *   vcs-overlay <command> [args] [--json]
  *
  * Commands:
  *   status                        list live agents, file counts, collisions
@@ -18,15 +18,14 @@
  * Pass --json for machine-readable output on any command.
  */
 
-import { snapshot, readLog, readBlob, sha256, scanDir, storeDir } from './overlay-store.mjs'
+import { snapshot, readLog, readBlob, sha256, scanDir } from './store.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { fileURLToPath } from 'node:url'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const PROJECT_ROOT = path.resolve(__dirname, '..')
-const SESSIONS_DIR = path.join(os.tmpdir(), 'vcs-sessions')
+// PROJECT_ROOT = the directory where you run the CLI (your project root).
+const PROJECT_ROOT = process.cwd()
+const SESSIONS_DIR = process.env.VCS_SESSIONS_DIR ?? path.join(os.tmpdir(), 'vcs-sessions')
 
 // ── ANSI ─────────────────────────────────────────────────────────────────────
 
@@ -169,7 +168,6 @@ function cmdStatus() {
     return console.log('No active agent sessions.')
   }
 
-  // Build per-agent file→hash map
   const data = agents.map(id => ({ id, files: agentFiles(id) }))
 
   // Collision detection: same relPath, different hash across agents
@@ -231,10 +229,7 @@ function cmdSnapshot(agentId) {
 function cmdLog(agentId) {
   const records = readLog(PROJECT_ROOT, agentId ? { agent: agentId } : {})
   if (jsonMode) return console.log(JSON.stringify(records, null, 2))
-  if (!records.length) {
-    console.log('No commits yet.')
-    return
-  }
+  if (!records.length) { console.log('No commits yet.'); return }
   for (const r of [...records].reverse()) {
     const count = Object.keys(r.files).length
     const ts = new Date(r.ts).toLocaleString()
@@ -250,21 +245,17 @@ function cmdDiff(agentId, commitId) {
   let filesMap  // relPath → content string
 
   if (commitId) {
-    // Diff a past commit's blobs vs project root
     const record = readLog(PROJECT_ROOT).find(r => r.id === commitId || r.id.startsWith(commitId))
     if (!record) return die(`Commit not found: ${commitId}`)
     filesMap = {}
-    for (const [relPath, { hash }] of Object.entries(record.files)) {
+    for (const [relPath, { hash }] of Object.entries(record.files))
       filesMap[relPath] = readBlob(PROJECT_ROOT, hash).toString('utf8')
-    }
   } else {
-    // Diff current overlay vs project root
     const oDir = overlayDir(agentId)
     if (!fs.existsSync(oDir)) return die(`No overlay dir for agent: ${agentId}`)
     filesMap = {}
-    for (const relPath of scanDir(oDir)) {
+    for (const relPath of scanDir(oDir))
       filesMap[relPath] = fs.readFileSync(path.join(oDir, relPath), 'utf8')
-    }
   }
 
   if (!Object.keys(filesMap).length) {
@@ -274,21 +265,15 @@ function cmdDiff(agentId, commitId) {
 
   if (jsonMode) {
     const diffs = []
-    for (const [relPath, newContent] of Object.entries(filesMap)) {
-      const oldContent = readSourceFile(relPath)
-      diffs.push({ path: relPath, changed: oldContent !== newContent })
-    }
+    for (const [relPath, newContent] of Object.entries(filesMap))
+      diffs.push({ path: relPath, changed: readSourceFile(relPath) !== newContent })
     return console.log(JSON.stringify({ agent: agentId, diffs }, null, 2))
   }
 
   let anyDiff = false
   for (const [relPath, newContent] of Object.entries(filesMap)) {
-    const oldContent = readSourceFile(relPath)
-    const patch = unifiedDiff(oldContent, newContent, relPath, relPath)
-    if (patch) {
-      console.log(patch)
-      anyDiff = true
-    }
+    const patch = unifiedDiff(readSourceFile(relPath), newContent, relPath, relPath)
+    if (patch) { console.log(patch); anyDiff = true }
   }
   if (!anyDiff) console.log('No differences.')
 }
@@ -303,7 +288,6 @@ function cmdPromote(agentId) {
     return
   }
   const commit = snapshot(agentId, oDir, PROJECT_ROOT, 'promote', reason)
-  // Copy overlay files onto project root
   for (const relPath of files) {
     const dest = path.join(PROJECT_ROOT, relPath)
     fs.mkdirSync(path.dirname(dest), { recursive: true })
@@ -330,13 +314,11 @@ function cmdCheckout(agentId, commitId) {
   const record = readLog(PROJECT_ROOT).find(r => r.id === commitId || r.id.startsWith(commitId))
   if (!record) return die(`Commit not found: ${commitId}`)
   const oDir = overlayDir(agentId)
-  // Write blobs back into the overlay dir
   for (const [relPath, { hash }] of Object.entries(record.files)) {
     const dest = path.join(oDir, relPath)
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     fs.writeFileSync(dest, readBlob(PROJECT_ROOT, hash))
   }
-  // Record the checkout in the log
   const commit = snapshot(agentId, oDir, PROJECT_ROOT, 'checkout', `from ${record.id.slice(0, 12)}`)
   if (jsonMode) return console.log(JSON.stringify(commit, null, 2))
   const count = Object.keys(record.files).length
@@ -348,7 +330,6 @@ async function cmdWatch() {
   if (!jsonMode) console.log(`Watching ${SESSIONS_DIR} for overlay changes…  (Ctrl-C to stop)\n`)
   if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true })
 
-  // Debounce map: agentId → timer
   const debounce = new Map()
 
   function onChange(agentId) {
@@ -374,7 +355,6 @@ async function cmdWatch() {
     if (agentId) onChange(agentId)
   })
 
-  // Keep process alive
   await new Promise(() => {})
 }
 
@@ -386,7 +366,7 @@ function die(msg) {
 }
 
 const USAGE = `
-Usage: node scripts/vcs-overlay.mjs <command> [args] [--json]
+Usage: vcs-overlay <command> [args] [--json]
 
   status                        list live agents, file counts, collisions
   snapshot <agent>              snapshot overlay to store
@@ -396,6 +376,8 @@ Usage: node scripts/vcs-overlay.mjs <command> [args] [--json]
   discard <agent>               clear overlay dir
   checkout <agent> <commit>     restore overlay from a past commit
   watch                         auto-snapshot on overlay changes
+
+Run from your project root. Store lives at <cwd>/.vcs-overlay/
 `.trim()
 
 switch (cmd) {

@@ -1,0 +1,13 @@
+{
+  "name": "vcs-overlay",
+  "displayName": "vcs-overlay",
+  "version": "0.1.0",
+  "description": "Teaches Claude Code to work with vcs-overlay: per-agent file overlays with content-addressed history for multi-session Vite development.",
+  "author": {
+    "name": "JussMor"
+  },
+  "homepage": "https://github.com/JussMor/spike/tree/main/packages/vcs-overlay",
+  "repository": "https://github.com/JussMor/spike",
+  "license": "MIT",
+  "keywords": ["vite", "overlay", "multi-agent", "hmr", "session"]
+}

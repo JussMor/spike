@@ -8,11 +8,12 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "agents": "node scripts/start-agents.mjs",
-    "vcs": "node scripts/vcs-overlay.mjs"
+    "vcs": "vcs-overlay"
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "vcs-overlay": "file:../../packages/vcs-overlay"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
