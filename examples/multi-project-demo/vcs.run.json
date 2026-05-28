@@ -1,0 +1,14 @@
+{
+  "agents": [
+    {
+      "id": "agent-1",
+      "port": 3001
+    },
+    {
+      "id": "agent-2",
+      "port": 3002
+    }
+  ],
+  "dashboard_port": 4000,
+  "store": ".vcs"
+}
