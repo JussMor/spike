@@ -1,0 +1,134 @@
+.app {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ── */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+.session-chip {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+}
+
+/* ── Main ── */
+.app-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: var(--border);
+}
+
+.app-main > * {
+  background: var(--bg);
+  padding: 28px 24px;
+}
+
+/* ── Overlay panel ── */
+.overlay-panel h2 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overlay-panel__count {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 1px 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.overlay-panel__meta {
+  margin-bottom: 12px;
+}
+
+.overlay-panel__meta code {
+  color: var(--muted);
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.overlay-panel__loading,
+.overlay-panel__empty {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.overlay-panel__files {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.overlay-panel__file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--accent-dim);
+  border: 1px solid rgba(78, 204, 163, 0.3);
+  border-radius: 4px;
+}
+
+.overlay-panel__badge {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  background: var(--accent);
+  color: #000;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.overlay-panel__file code {
+  color: var(--text);
+  font-size: 0.825rem;
+}
+
+/* ── Instructions ── */
+.instructions h2 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.instructions ol {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.instructions li { line-height: 1.55; }
+.instructions code { color: var(--text); }
