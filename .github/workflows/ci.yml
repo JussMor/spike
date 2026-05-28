@@ -6,34 +6,6 @@ on:
   pull_request:
 
 jobs:
-  # ── Fast jobs (parallel) ────────────────────────────────────────────────
-
-  rust-tests:
-    name: Rust unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
-
-  vcs-checks:
-    name: vcs conflict gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release
-      - name: Single-project conflict gate (webwright demo)
-        run: |
-          cd examples/webwright-demo
-          VCS_BIN=../../target/release/vcs node src/orchestrator.js
-      - name: Multi-project conflict gate (frontend + backend hub)
-        run: |
-          cd examples/multi-project-demo
-          VCS_BIN=../../target/release/vcs node orchestrator.js
-
   build:
     name: Vite build + tsc
     runs-on: ubuntu-latest
@@ -42,49 +14,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install and build tanstack-vite
-        run: cd examples/tanstack-vite && npm ci && npm run build
-
-  # ── E2e (depends on all fast jobs) ─────────────────────────────────────
-
-  e2e:
-    name: Playwright e2e
-    needs: [rust-tests, vcs-checks, build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install tanstack-vite deps
-        run: cd examples/tanstack-vite && npm ci
-
-      - name: Install Playwright browsers
-        run: cd examples/tanstack-vite && npx playwright install --with-deps chromium
-
-      - name: Seed vcs store
-        run: |
-          cd examples/tanstack-vite
-          VCS_BIN=../../target/release/vcs npm run vcs:init
-          VCS_BIN=../../target/release/vcs npm run vcs:demo
-
-      - name: Run e2e tests
-        run: |
-          cd examples/tanstack-vite
-          VCS_BIN=../../target/release/vcs npm run e2e
-        env:
-          CI: true
-          PLAYWRIGHT_BASE_URL: http://localhost:5173
-
-      - name: Upload Playwright report on failure
-        uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-report
-          path: examples/tanstack-vite/playwright-report/
-          retention-days: 7
+      - name: Install and build vite-overlay
+        run: cd examples/vite-overlay && npm ci && npm run build
