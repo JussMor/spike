@@ -1,9 +1,0 @@
-{
-  "root": ".",
-  "store": ".vcs",
-  "dashboard_port": 4000,
-  "agents": [
-    { "id": "agent-ui",  "port": 3001 },
-    { "id": "agent-api", "port": 3002 }
-  ]
-}
